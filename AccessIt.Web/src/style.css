@@ -1,0 +1,6 @@
+:root { font-family: system-ui, Avenir, Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1f1f1f; background: #f0f2f5; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #f0f2f5; }
+#app { min-height: 100vh; }
+.ant-page-header { padding: 0 0 16px; }
+@media (max-width: 700px) { .ant-table { font-size: 12px; } }
