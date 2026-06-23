@@ -116,6 +116,8 @@ public class IssuanceJob
     public Guid? AccessDeviceId { get; set; }
     public Guid? ParentJobId { get; set; }
     public Guid? RelatedEntityId { get; set; }
+    // Retains the old card number for a queued card replacement after the AccessCard record has been edited.
+    public string? CardNoOverride { get; set; }
     public int Sequence { get; set; }
     public IssuanceStepType Type { get; set; }
     public IssuanceJobStatus Status { get; set; } = IssuanceJobStatus.Pending;

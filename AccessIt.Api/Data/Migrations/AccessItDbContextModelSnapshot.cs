@@ -493,6 +493,9 @@ namespace AccessIt.Api.Data.Migrations
                     b.Property<Guid?>("RelatedEntityId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CardNoOverride")
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("Sequence")
                         .HasColumnType("INTEGER");
 

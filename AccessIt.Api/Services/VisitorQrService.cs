@@ -36,7 +36,29 @@ public sealed class VisitorQrService(
         var device = await db.AccessDevices.FindAsync([deviceId], cancellationToken) ?? throw new KeyNotFoundException("Device was not found.");
         var hasGrant = await db.DeviceGrants.AnyAsync(x => x.AccessPersonId == visitorId && x.AccessDeviceId == deviceId && x.IsActive, cancellationToken);
         if (!hasGrant) throw new InvalidOperationException("Visitor is not authorized for the selected device.");
-        var card = visitor.Cards.FirstOrDefault(x => x.IsVirtual) ?? throw new InvalidOperationException("Create and successfully issue a virtual card before generating the QR code.");
+        if (!device.SupportsUserInfo || !device.SupportsCardInfo)
+            throw new InvalidOperationException("The selected device does not support visitor QR cards.");
+        var card = visitor.Cards.FirstOrDefault(x => x.IsVirtual);
+        if (card is null)
+        {
+            card = new AccessCard { AccessPersonId = visitor.Id, CardNo = await CreateVirtualCardNoAsync(visitor.Sequence, cancellationToken), IsVirtual = true };
+            visitor.Cards.Add(card);
+            await db.SaveChangesAsync(cancellationToken);
+            await audit.WriteAsync(hostUserId, "visitor.virtual-card.created", "AccessCard", card.Id, new { visitor.EmployeeNo, card.CardNo }, cancellationToken);
+        }
+
+        // QR generation requires the card to exist on the target device. Make the prerequisite explicit and synchronous,
+        // rather than asking an operator to infer whether a background issuance job has already completed.
+        if (device.SupportsUserRightPlanTemplate)
+        {
+            var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
+            if (!template.Succeeded) throw new InvalidOperationException($"Unable to prepare the device access template: {template.Message}");
+        }
+        var user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
+        if (!user.Succeeded) throw new InvalidOperationException($"Unable to issue visitor to the device: {user.Message}");
+        var issuedCard = await hikiot.UpsertCardAsync(device.DeviceSerial, visitor, card, cancellationToken);
+        if (!issuedCard.Succeeded) throw new InvalidOperationException($"Unable to issue the visitor QR card to the device: {issuedCard.Message}");
+        await audit.WriteAsync(hostUserId, "visitor.virtual-card.issued", "AccessCard", card.Id, new { visitor.EmployeeNo, device.DeviceSerial, issuedCard.TraceId }, cancellationToken);
 
         var now = timeProvider.GetUtcNow();
         var visitorEnd = new DateTimeOffset(visitor.EnableEndTime).ToUniversalTime();
@@ -87,5 +109,17 @@ public sealed class VisitorQrService(
     {
         if (string.IsNullOrWhiteSpace(_options.PublicBaseUrl)) throw new InvalidOperationException("Hikiot:PublicBaseUrl is not configured.");
         return $"{_options.PublicBaseUrl.TrimEnd('/')}/public/visitor-qr/{Uri.EscapeDataString(token)}";
+    }
+
+    private async Task<string> CreateVirtualCardNoAsync(long sequence, CancellationToken cancellationToken)
+    {
+        var prefix = $"Q{sequence:X10}";
+        var candidate = prefix;
+        for (var attempt = 0; await db.AccessCards.AnyAsync(x => x.CardNo == candidate, cancellationToken); attempt++)
+        {
+            if (attempt >= 8) throw new InvalidOperationException("Unable to allocate a unique virtual card number.");
+            candidate = $"Q{Convert.ToHexString(Guid.NewGuid().ToByteArray())[..12]}";
+        }
+        return candidate;
     }
 }

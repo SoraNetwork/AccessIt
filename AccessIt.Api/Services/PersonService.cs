@@ -8,13 +8,16 @@ namespace AccessIt.Api.Services;
 public sealed record CreateEmployeeInput(string Name, string? DingTalkUserId, string? Mobile, IReadOnlyList<Guid> DeviceIds);
 public sealed record CreateVisitorInput(string Name, DateTime BeginTime, DateTime EndTime, int MaxOpenDoorTime, string? Mobile, IReadOnlyList<Guid> DeviceIds);
 public sealed record UpdateVisitorInput(DateTime BeginTime, DateTime EndTime, int MaxOpenDoorTime, string? Mobile, IReadOnlyList<Guid> DeviceIds);
+public sealed record UpdateEmployeeInput(string Name, string? DingTalkUserId, string? Mobile);
 
 public interface IPersonService
 {
     Task<AccessPerson> CreateEmployeeAsync(CreateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default);
     Task<AccessPerson> CreateVisitorAsync(CreateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default);
     Task<AccessPerson> UpdateVisitorAsync(Guid personId, UpdateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default);
+    Task<AccessPerson> UpdateEmployeeAsync(Guid personId, UpdateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default);
     Task<AccessCard> AddCardAsync(Guid personId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default);
+    Task<AccessCard> UpdateCardAsync(Guid personId, Guid cardId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default);
     Task SetPasswordAsync(Guid personId, string password, string actorUserId, CancellationToken cancellationToken = default);
     Task<FaceAsset> AddFaceAsync(Guid personId, Stream image, string actorUserId, CancellationToken cancellationToken = default);
     Task DeleteAsync(Guid personId, string actorUserId, CancellationToken cancellationToken = default);
@@ -65,6 +68,23 @@ public sealed class PersonService(
         return person;
     }
 
+    public async Task<AccessPerson> UpdateEmployeeAsync(Guid personId, UpdateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default)
+    {
+        var person = await LoadPersonAsync(personId, cancellationToken);
+        if (person.Kind != PersonKind.Employee) throw new InvalidOperationException("Only employee details can be updated here.");
+        ArgumentException.ThrowIfNullOrWhiteSpace(input.Name);
+        if (System.Text.Encoding.UTF8.GetByteCount(input.Name.Trim()) > 32)
+            throw new ArgumentOutOfRangeException(nameof(input.Name), "Name must not exceed 32 UTF-8 bytes.");
+        person.Name = input.Name.Trim();
+        person.DingTalkUserId = string.IsNullOrWhiteSpace(input.DingTalkUserId) ? null : input.DingTalkUserId.Trim();
+        person.Mobile = string.IsNullOrWhiteSpace(input.Mobile) ? null : input.Mobile.Trim();
+        person.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
+        await audit.WriteAsync(actorUserId, "person.employee.updated", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
+        return person;
+    }
+
     public async Task<AccessCard> AddCardAsync(Guid personId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cardNo);
@@ -74,9 +94,32 @@ public sealed class PersonService(
         db.AccessCards.Add(card);
         person.Cards.Add(card);
         await db.SaveChangesAsync(cancellationToken);
-        if (person.Kind == PersonKind.Visitor)
-            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.card.added", "AccessCard", card.Id, new { person.EmployeeNo, card.CardNo }, cancellationToken);
+        return card;
+    }
+
+    public async Task<AccessCard> UpdateCardAsync(Guid personId, Guid cardId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(cardNo);
+        var person = await LoadPersonAsync(personId, cancellationToken);
+        var card = person.Cards.SingleOrDefault(x => x.Id == cardId) ?? throw new KeyNotFoundException("Card was not found for this person.");
+        var newCardNo = cardNo.Trim();
+        if (await db.AccessCards.AnyAsync(x => x.CardNo == newCardNo && x.Id != cardId, cancellationToken))
+            throw new InvalidOperationException("The card number is already assigned to another person.");
+        var oldCardNo = card.CardNo;
+        var numberChanged = !string.Equals(oldCardNo, newCardNo, StringComparison.Ordinal);
+        card.CardNo = newCardNo;
+        card.IsVirtual = isVirtual;
+        if (numberChanged) card.HikiotIdentificationId = null;
+        person.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        var devices = await ActiveDevicesAsync(personId, cancellationToken);
+        if (numberChanged && devices.Count > 0)
+            await jobs.QueueCardReplacementAsync(person, card, oldCardNo, devices, actorUserId, cancellationToken);
+        else if (devices.Count > 0)
+            await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+        await audit.WriteAsync(actorUserId, "person.card.updated", "AccessCard", card.Id, new { person.EmployeeNo, oldCardNo, card.CardNo, card.IsVirtual }, cancellationToken);
         return card;
     }
 
@@ -93,8 +136,7 @@ public sealed class PersonService(
         record.ProtectedValue = secretProtector.Protect(password);
         record.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        if (person.Kind == PersonKind.Visitor)
-            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.password.updated", "AccessPerson", personId, null, cancellationToken);
     }
 
@@ -105,8 +147,7 @@ public sealed class PersonService(
         var face = await faceStorage.StoreAsync(person, image, cancellationToken);
         person.FaceAssets.Add(face);
         await db.SaveChangesAsync(cancellationToken);
-        if (person.Kind == PersonKind.Visitor)
-            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.face.updated", "FaceAsset", face.Id, new { person.EmployeeNo }, cancellationToken);
         return face;
     }
@@ -150,6 +191,12 @@ public sealed class PersonService(
 
     private Task<List<AccessDevice>> ActiveDevicesAsync(Guid personId, CancellationToken cancellationToken)
         => db.DeviceGrants.Where(x => x.AccessPersonId == personId && x.IsActive).Select(x => x.AccessDevice).ToListAsync(cancellationToken);
+
+    private async Task QueueCurrentGrantsAsync(AccessPerson person, string actorUserId, CancellationToken cancellationToken)
+    {
+        var devices = await ActiveDevicesAsync(person.Id, cancellationToken);
+        if (devices.Count > 0) await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+    }
 
     private async Task<long> NextSequenceAsync(PersonKind kind, CancellationToken cancellationToken)
     {

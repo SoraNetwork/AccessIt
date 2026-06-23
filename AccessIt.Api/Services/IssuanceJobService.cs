@@ -10,7 +10,9 @@ public interface IIssuanceJobService
 {
     Task QueueUpsertAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default);
     Task QueueDeleteAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default);
+    Task QueueCardReplacementAsync(AccessPerson person, AccessCard card, string oldCardNo, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default);
     Task<bool> ProcessNextAsync(CancellationToken cancellationToken = default);
+    Task<int> ProcessPendingForPersonAsync(Guid personId, CancellationToken cancellationToken = default);
     Task RetryAsync(Guid jobId, string actorUserId, CancellationToken cancellationToken = default);
 }
 
@@ -21,6 +23,8 @@ public sealed class IssuanceJobService(
     IAuditService audit,
     TimeProvider timeProvider) : IIssuanceJobService
 {
+    private static readonly SemaphoreSlim ProcessingGate = new(1, 1);
+
     public async Task QueueUpsertAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
     {
         var cards = person.Cards.ToList();
@@ -44,6 +48,7 @@ public sealed class IssuanceJobService(
         }
         await db.SaveChangesAsync(cancellationToken);
         await audit.WriteAsync(actorUserId, "issuance.upsert.queued", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
+        await ProcessPendingForPersonAsync(person.Id, cancellationToken);
     }
 
     public async Task QueueDeleteAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
@@ -60,13 +65,41 @@ public sealed class IssuanceJobService(
         }
         await db.SaveChangesAsync(cancellationToken);
         await audit.WriteAsync(actorUserId, "issuance.delete.queued", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
+        await ProcessPendingForPersonAsync(person.Id, cancellationToken);
     }
 
-    public async Task<bool> ProcessNextAsync(CancellationToken cancellationToken = default)
+    public async Task QueueCardReplacementAsync(AccessPerson person, AccessCard card, string oldCardNo, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(oldCardNo);
+        foreach (var device in devices.Where(x => x.IsManaged && x.SupportsCardInfo).DistinctBy(x => x.Id))
+        {
+            var workflowId = Guid.NewGuid();
+            AddJob(workflowId, 1, person.Id, device.Id, IssuanceStepType.DeleteCard, card.Id, oldCardNo);
+            AddJob(workflowId, 2, person.Id, device.Id, IssuanceStepType.UpsertCard, card.Id);
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        await audit.WriteAsync(actorUserId, "issuance.card-replacement.queued", "AccessCard", card.Id, new { person.EmployeeNo, oldCardNo, card.CardNo }, cancellationToken);
+        await ProcessPendingForPersonAsync(person.Id, cancellationToken);
+    }
+
+    public Task<bool> ProcessNextAsync(CancellationToken cancellationToken = default)
+        => ProcessNextInternalAsync(null, cancellationToken);
+
+    public async Task<int> ProcessPendingForPersonAsync(Guid personId, CancellationToken cancellationToken = default)
+    {
+        var processed = 0;
+        while (await ProcessNextInternalAsync(personId, cancellationToken)) processed++;
+        return processed;
+    }
+
+    private async Task<bool> ProcessNextInternalAsync(Guid? personId, CancellationToken cancellationToken)
+    {
+        await ProcessingGate.WaitAsync(cancellationToken);
+        try
+        {
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var candidates = await db.IssuanceJobs
-            .Where(x => x.Status == IssuanceJobStatus.Pending && x.NextAttemptAtUtc <= now)
+            .Where(x => x.Status == IssuanceJobStatus.Pending && x.NextAttemptAtUtc <= now && (personId == null || x.AccessPersonId == personId))
             .OrderBy(x => x.CreatedAtUtc)
             .Take(50)
             .ToListAsync(cancellationToken);
@@ -124,6 +157,11 @@ public sealed class IssuanceJobService(
         await db.SaveChangesAsync(cancellationToken);
         await audit.WriteAsync(null, result.Succeeded ? "issuance.succeeded" : "issuance.failed", "IssuanceJob", job.Id, new { job.Type, result.Code, result.Message, result.TraceId }, cancellationToken);
         return true;
+        }
+        finally
+        {
+            ProcessingGate.Release();
+        }
     }
 
     public async Task RetryAsync(Guid jobId, string actorUserId, CancellationToken cancellationToken = default)
@@ -136,9 +174,10 @@ public sealed class IssuanceJobService(
         job.FailureMessage = null;
         await db.SaveChangesAsync(cancellationToken);
         await audit.WriteAsync(actorUserId, "issuance.retry", "IssuanceJob", job.Id, null, cancellationToken);
+        if (job.AccessPersonId is Guid personId) await ProcessPendingForPersonAsync(personId, cancellationToken);
     }
 
-    private void AddJob(Guid workflowId, int sequence, Guid personId, Guid deviceId, IssuanceStepType type, Guid? relatedEntityId)
+    private void AddJob(Guid workflowId, int sequence, Guid personId, Guid deviceId, IssuanceStepType type, Guid? relatedEntityId, string? cardNoOverride = null)
     {
         db.IssuanceJobs.Add(new IssuanceJob
         {
@@ -147,6 +186,7 @@ public sealed class IssuanceJobService(
             AccessPersonId = personId,
             AccessDeviceId = deviceId,
             RelatedEntityId = relatedEntityId,
+            CardNoOverride = cardNoOverride,
             Type = type
         });
     }
@@ -163,9 +203,9 @@ public sealed class IssuanceJobService(
         {
             IssuanceStepType.EnsureAllDayTemplate => await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken),
             IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, await GetPasswordAsync(person.Id, cancellationToken), cancellationToken),
-            IssuanceStepType.UpsertCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, false, cancellationToken),
+            IssuanceStepType.UpsertCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, false, null, cancellationToken),
             IssuanceStepType.UpsertFace => await ExecuteFaceAsync(device.DeviceSerial, person, job.RelatedEntityId, false, cancellationToken),
-            IssuanceStepType.DeleteCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, true, cancellationToken),
+            IssuanceStepType.DeleteCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, true, job.CardNoOverride, cancellationToken),
             IssuanceStepType.DeleteFace => await ExecuteFaceAsync(device.DeviceSerial, person, job.RelatedEntityId, true, cancellationToken),
             IssuanceStepType.DeleteUser => await hikiot.DeleteUserAsync(device.DeviceSerial, person.EmployeeNo, cancellationToken),
             _ => HikiotOperationResult.Failure(160103, "Unsupported issuance step.")
@@ -178,8 +218,9 @@ public sealed class IssuanceJobService(
         return password is null ? null : secretProtector.Unprotect(password.ProtectedValue);
     }
 
-    private async Task<HikiotOperationResult> ExecuteCardAsync(string deviceSerial, AccessPerson person, Guid? cardId, bool delete, CancellationToken cancellationToken)
+    private async Task<HikiotOperationResult> ExecuteCardAsync(string deviceSerial, AccessPerson person, Guid? cardId, bool delete, string? cardNoOverride, CancellationToken cancellationToken)
     {
+        if (delete && !string.IsNullOrWhiteSpace(cardNoOverride)) return await hikiot.DeleteCardAsync(deviceSerial, cardNoOverride, cancellationToken);
         if (cardId is not Guid id) return HikiotOperationResult.Failure(160103, "Card is missing from the issuance job.");
         var card = await db.AccessCards.FindAsync([id], cancellationToken);
         return card is null ? HikiotOperationResult.Failure(160103, "Card no longer exists.")

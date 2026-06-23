@@ -105,15 +105,15 @@ public sealed class HikiotTeamPeopleService(
             ?? throw new KeyNotFoundException("Person was not found.");
         if (person.Kind != PersonKind.Employee) throw new InvalidOperationException("Only employees can be published to the HIKIoT team.");
         if (person.Status != PersonStatus.Active) throw new InvalidOperationException("Only active employees can be published to the HIKIoT team.");
-        if (!MainlandPhone.IsMatch(person.Mobile ?? string.Empty)) throw new InvalidOperationException("A valid 11-digit mainland China mobile number is required before publishing to HIKIoT.");
 
         var connection = await hikiot.GetConnectionStatusAsync(cancellationToken);
         if (!connection.IsAuthorized) throw new InvalidOperationException("HIKIoT authorization is missing or expired. Reauthorize it in System Settings first.");
-        if (string.IsNullOrWhiteSpace(connection.DefaultDepartmentNo)) throw new InvalidOperationException("Select a default HIKIoT team department in System Settings before publishing.");
 
         var created = false;
         if (string.IsNullOrWhiteSpace(person.HikiotPersonNo))
         {
+            if (string.IsNullOrWhiteSpace(connection.DefaultDepartmentNo)) throw new InvalidOperationException("Select a default HIKIoT team department in System Settings before creating a new team member.");
+            if (!MainlandPhone.IsMatch(person.Mobile ?? string.Empty)) throw new InvalidOperationException("A valid 11-digit mainland China mobile number is required before creating a HIKIoT team member.");
             var createdResult = await hikiot.CreateTeamPersonAsync(new HikiotTeamPersonUpsert(null, person.Name, connection.DefaultDepartmentNo, person.Mobile!, person.EmployeeNo, person.HikiotJobPosition, person.HikiotSex), cancellationToken);
             if (!createdResult.Succeeded || string.IsNullOrWhiteSpace(createdResult.PersonNo)) throw new InvalidOperationException($"Unable to create HIKIoT team member: {createdResult.Code} {createdResult.Message}");
             person.HikiotPersonNo = createdResult.PersonNo;
@@ -123,7 +123,8 @@ public sealed class HikiotTeamPeopleService(
         }
         else
         {
-            var update = await hikiot.UpdateTeamPersonAsync(new HikiotTeamPersonUpsert(person.HikiotPersonNo, person.Name, person.HikiotDepartmentNo ?? connection.DefaultDepartmentNo, person.Mobile!, person.HikiotJobNumber ?? person.EmployeeNo, person.HikiotJobPosition, person.HikiotSex), cancellationToken);
+            // This person already belongs to the HIKIoT team. Update their profile without adding or moving them.
+            var update = await hikiot.UpdateTeamPersonAsync(new HikiotTeamPersonUpsert(person.HikiotPersonNo, person.Name, person.HikiotDepartmentNo ?? string.Empty, person.Mobile!, person.HikiotJobNumber ?? person.EmployeeNo, person.HikiotJobPosition, person.HikiotSex), cancellationToken);
             if (!update.Succeeded) throw new InvalidOperationException($"Unable to update HIKIoT team member: {update.Code} {update.Message}");
         }
 
@@ -133,6 +134,16 @@ public sealed class HikiotTeamPeopleService(
         if (cards.Count > 4) throw new InvalidOperationException("HIKIoT supports at most four physical cards per team member.");
         foreach (var card in cards)
         {
+            var previousManagedCard = card.HikiotIdentificationId is long previousId
+                ? remoteIdentifications.SingleOrDefault(x => x.Id == previousId && x.Type == HikiotIdentificationType.Card)
+                : null;
+            if (previousManagedCard is not null && !string.Equals(previousManagedCard.Content, card.CardNo, StringComparison.Ordinal))
+            {
+                var removed = await hikiot.DeleteTeamIdentificationAsync(previousManagedCard.Id, cancellationToken);
+                if (!removed.Succeeded) throw new InvalidOperationException($"Unable to replace card {previousManagedCard.Content}: {removed.Code} {removed.Message}");
+                card.HikiotIdentificationId = null;
+                remoteIdentifications = remoteIdentifications.Where(x => x.Id != previousManagedCard.Id).ToList();
+            }
             var remote = remoteIdentifications.SingleOrDefault(x => x.Type == HikiotIdentificationType.Card && x.Content == card.CardNo);
             if (remote is not null) { card.HikiotIdentificationId = remote.Id; continue; }
             var added = await hikiot.AddTeamIdentificationAsync(teamPersonNo, HikiotIdentificationType.Card, card.CardNo, cancellationToken);

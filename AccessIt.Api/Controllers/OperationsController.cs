@@ -41,8 +41,17 @@ public sealed class OperationsController(AccessItDbContext db, IIssuanceJobServi
 
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("visitor-qr")]
-    public Task<VisitorQrIssueResult> IssueQr([FromBody] IssueVisitorQrRequest request, CancellationToken cancellationToken)
-        => qr.IssueAsync(request.VisitorId, request.DeviceId, request.ExpireMinutes, request.MaxOpenTimes, User.CurrentUserId(), cancellationToken);
+    public async Task<ActionResult<VisitorQrIssueResult>> IssueQr([FromBody] IssueVisitorQrRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await qr.IssueAsync(request.VisitorId, request.DeviceId, request.ExpireMinutes, request.MaxOpenTimes, User.CurrentUserId(), cancellationToken));
+        }
+        catch (InvalidOperationException exception)
+        {
+            return BadRequest(new { message = exception.Message });
+        }
+    }
 
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("visitor-qr/{id:guid}/revoke")]

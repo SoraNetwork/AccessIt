@@ -67,8 +67,16 @@ public sealed class PeopleController(AccessItDbContext db, IPersonService people
     public Task<AccessPerson> UpdateVisitor(Guid id, [FromBody] UpdateVisitorInput input, CancellationToken cancellationToken) => people.UpdateVisitorAsync(id, input, User.CurrentUserId(), cancellationToken);
 
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
+    [HttpPut("{id:guid}/employee")]
+    public Task<AccessPerson> UpdateEmployee(Guid id, [FromBody] UpdateEmployeeInput input, CancellationToken cancellationToken) => people.UpdateEmployeeAsync(id, input, User.CurrentUserId(), cancellationToken);
+
+    [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("{id:guid}/cards")]
     public Task<AccessCard> AddCard(Guid id, [FromBody] AddCardRequest input, CancellationToken cancellationToken) => people.AddCardAsync(id, input.CardNo, input.IsVirtual, User.CurrentUserId(), cancellationToken);
+
+    [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
+    [HttpPut("{id:guid}/cards/{cardId:guid}")]
+    public Task<AccessCard> UpdateCard(Guid id, Guid cardId, [FromBody] AddCardRequest input, CancellationToken cancellationToken) => people.UpdateCardAsync(id, cardId, input.CardNo, input.IsVirtual, User.CurrentUserId(), cancellationToken);
 
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPut("{id:guid}/password")]
