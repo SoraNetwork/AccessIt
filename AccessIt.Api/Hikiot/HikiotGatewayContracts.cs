@@ -112,6 +112,7 @@ public sealed class HikiotTeamDepartmentPayload
 {
     public string DepartNo { get; init; } = string.Empty;
     public string DepartName { get; init; } = string.Empty;
+    [JsonConverter(typeof(StringOrNumberConverter))]
     public string? ParentId { get; init; }
     public string? Path { get; init; }
     [JsonConverter(typeof(NumberOrBooleanConverter))]
@@ -197,4 +198,26 @@ public sealed class NumberOrBooleanConverter : JsonConverter<bool>
         };
 
     public override void Write(Utf8JsonWriter writer, bool value, JsonSerializerOptions options) => writer.WriteBooleanValue(value);
+}
+
+/// <summary>HIKIoT returns root department parentId as numeric 0, but child values as strings.</summary>
+public sealed class StringOrNumberConverter : JsonConverter<string?>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        => reader.TokenType switch
+        {
+            JsonTokenType.Null => null,
+            JsonTokenType.String => reader.GetString(),
+            JsonTokenType.Number when reader.TryGetInt64(out var number) => number.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            JsonTokenType.Number => reader.GetDouble().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            JsonTokenType.True => "true",
+            JsonTokenType.False => "false",
+            _ => throw new JsonException("Expected a string, number, boolean, or null value.")
+        };
+
+    public override void Write(Utf8JsonWriter writer, string? value, JsonSerializerOptions options)
+    {
+        if (value is null) writer.WriteNullValue();
+        else writer.WriteStringValue(value);
+    }
 }
