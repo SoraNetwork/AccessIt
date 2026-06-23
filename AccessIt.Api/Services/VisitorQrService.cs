@@ -56,14 +56,15 @@ public sealed class VisitorQrService(
 
         // QR generation requires the card to exist on the target device. Make the prerequisite explicit and synchronous,
         // rather than asking an operator to infer whether a background issuance job has already completed.
-        if (device.SupportsUserRightPlanTemplate && !device.HasAllDayTemplate)
+        if (device.SupportsUserRightPlanTemplate && (device.AllDayTemplateId == null || !device.HasAllDayTemplate))
         {
             var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
             if (!template.Succeeded) throw new InvalidOperationException($"Unable to prepare the device access template: {template.Message}");
             device.HasAllDayTemplate = true;
+            device.AllDayTemplateId = 8;
             await db.SaveChangesAsync(cancellationToken);
         }
-        var user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
+        var user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, device.SupportsUserRightPlanTemplate ? device.AllDayTemplateId : null, cancellationToken);
         // HasAllDayTemplate is a local cache. A device reset or a prior failed initialization can
         // make it stale; HIK reports that as the generic 160103 setting error. Rebuild our managed
         // all-day template once and retry the visitor user before reporting the real device error.
@@ -72,8 +73,9 @@ public sealed class VisitorQrService(
             var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
             if (!template.Succeeded) throw new InvalidOperationException($"Unable to restore the device access template: {template.Code} {template.Message}{FormatDetail(template.Detail)}");
             device.HasAllDayTemplate = true;
+            device.AllDayTemplateId = 8;
             await db.SaveChangesAsync(cancellationToken);
-            user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
+            user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, device.SupportsUserRightPlanTemplate ? device.AllDayTemplateId : null, cancellationToken);
         }
         if (!user.Succeeded) throw new InvalidOperationException($"Unable to issue visitor to the device: {user.Code} {user.Message}{FormatDetail(user.Detail)}");
         var issuedCard = await hikiot.UpsertCardAsync(device.DeviceSerial, visitor, card, cancellationToken);

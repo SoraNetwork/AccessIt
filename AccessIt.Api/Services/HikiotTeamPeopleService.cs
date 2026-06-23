@@ -192,6 +192,15 @@ public sealed class HikiotTeamPeopleService(
         var revocation = await authorityIssuance.RevokeEmployeeAsync(person, actorUserId, cancellationToken);
         if (revocation.Failures.Count > 0 || revocation.PendingCount > 0)
             throw new InvalidOperationException("The employee's device permissions have not been fully revoked, so the HIKIoT team member was kept. Review the authority issue status and retry.");
+        
+        // Spec rule 9: Delete team identifications before deleting the team member
+        var identifications = await hikiot.GetTeamIdentificationsAsync(personNo, cancellationToken);
+        foreach (var id in identifications)
+        {
+            var deleted = await hikiot.DeleteTeamIdentificationAsync(id.Id, cancellationToken);
+            if (!deleted.Succeeded) throw new InvalidOperationException($"Unable to delete team identification {id.Id}: {deleted.Message}");
+        }
+
         var result = await hikiot.RemoveTeamPersonAsync(personNo, cancellationToken);
         if (!result.Succeeded) throw new InvalidOperationException($"Unable to remove HIKIoT team member: {result.Code} {result.Message}");
         person.HikiotPersonNo = null;

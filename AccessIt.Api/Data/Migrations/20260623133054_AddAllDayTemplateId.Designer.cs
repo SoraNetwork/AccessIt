@@ -3,6 +3,7 @@ using System;
 using AccessIt.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AccessIt.Api.Data.Migrations
 {
     [DbContext(typeof(AccessItDbContext))]
-    partial class AccessItDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260623133054_AddAllDayTemplateId")]
+    partial class AddAllDayTemplateId
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");

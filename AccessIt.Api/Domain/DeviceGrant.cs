@@ -48,6 +48,12 @@ public class AccessDevice
     public bool SupportsUserRightPlanTemplate { get; set; }
     // The all-day plan/template used by direct user issuance has been initialized on this device.
     public bool HasAllDayTemplate { get; set; }
+    /// <summary>
+    /// The HIKIoT-assigned userPlanTemplate ID returned by <c>EnsureAllDayTemplateAsync</c>.
+    /// Null until the template has been created. Must be passed to UpsertUser so the correct
+    /// door-right plan is sent; never use a hardcoded value.
+    /// </summary>
+    public int? AllDayTemplateId { get; set; }
     public DateTime? LastSyncedAtUtc { get; set; }
     public ICollection<DeviceGrant> DeviceGrants { get; set; } = new List<DeviceGrant>();
 }

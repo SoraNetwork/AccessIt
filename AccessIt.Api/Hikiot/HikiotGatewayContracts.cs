@@ -22,7 +22,8 @@ public interface IHikiotGateway
     Task CompleteAuthorizationAsync(string state, string authCode, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<HikiotDiscoveredDevice>> DiscoverDevicesAsync(CancellationToken cancellationToken = default);
     Task<HikiotOperationResult> EnsureAllDayTemplateAsync(string deviceSerial, CancellationToken cancellationToken = default);
-    Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, CancellationToken cancellationToken = default);
+    Task<HikiotFaceDetectResult> FaceDetectAsync(string personNo, string imageUrl, CancellationToken cancellationToken = default);
+    Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, int? userRightPlanTemplateId = null, CancellationToken cancellationToken = default);
     Task<HikiotOperationResult> UpsertCardAsync(string deviceSerial, AccessPerson person, AccessCard card, CancellationToken cancellationToken = default);
     Task<HikiotOperationResult> UpsertFaceAsync(string deviceSerial, AccessPerson person, FaceAsset face, CancellationToken cancellationToken = default);
     Task<HikiotOperationResult> DeleteUserAsync(string deviceSerial, string employeeNo, CancellationToken cancellationToken = default);
@@ -45,6 +46,7 @@ public sealed record HikiotOperationResult(bool Succeeded, int Code, string Mess
 {
     public static HikiotOperationResult Failure(int code, string message, string? detail = null) => new(false, code, message, null, detail);
 }
+public sealed record HikiotFaceDetectResult(bool Succeeded, int Code, string Message, double? Score, bool Passed, string? Detail = null);
 public sealed record HikiotQrCodeResult(bool Succeeded, int Code, string Message, string? TraceId, string? QrCode, DateTime? ExpiresAtUtc, string? Detail = null);
 public sealed record HikiotRemotePerson(string EmployeeNo, string Name, string UserType, bool PermanentValid, DateTime? BeginTime, DateTime? EndTime, int OpenDoorTime, int MaxOpenDoorTime, int CardCount, int FaceCount);
 public sealed record HikiotPeopleSearchResult(bool Succeeded, int Code, string Message, long Count, IReadOnlyList<HikiotRemotePerson> People, string? Detail = null);

@@ -6,11 +6,42 @@ namespace AccessIt.Api.Hikiot;
 
 public static class HikiotUserCommandFactory
 {
-    public static HikiotUserUpsertCommand Create(string deviceSerial, AccessPerson person, string? password)
+    /// <summary>
+    /// Builds an addOneRecord command for the given device and person.
+    /// </summary>
+    /// <param name="deviceSerial">Target device serial number.</param>
+    /// <param name="person">The person whose credentials are being written.</param>
+    /// <param name="password">
+    ///   Optional password. Only sent for devices where <see cref="AccessDevice.SupportsPurePassword"/> is true.
+    ///   Must be within the device-declared length bounds (typically 4–8 digits).
+    /// </param>
+    /// <param name="userRightPlanTemplateId">
+    ///   Optional time-plan template ID returned by <c>EnsureAllDayTemplateAsync</c>.
+    ///   When null the command omits <c>doorRightPlan</c> entirely so HIKIoT uses the device default.
+    ///   Never pass a hardcoded value — use the template ID that was persisted on <see cref="AccessDevice"/>.
+    /// </param>
+    public static HikiotUserUpsertCommand Create(
+        string deviceSerial,
+        AccessPerson person,
+        string? password,
+        int? userRightPlanTemplateId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceSerial);
-        if (!string.IsNullOrWhiteSpace(password) && (password.Length < 4 || password.Length > 6))
-            throw new ArgumentOutOfRangeException(nameof(password), "HIKIoT passwords must contain 4 to 6 characters.");
+
+        // HIKIoT documents password length as 4–8 digits; devices may declare a narrower range.
+        // We validate at the service layer using the device-reported capability. Here we only
+        // guard against obviously invalid values to prevent silent truncation on the device side.
+        if (!string.IsNullOrWhiteSpace(password) && (password.Length < 4 || password.Length > 8))
+            throw new ArgumentOutOfRangeException(nameof(password), "Device passwords must be 4 to 8 digits.");
+
+        List<HikiotDoorRightPlan>? doorRightPlan = null;
+        if (userRightPlanTemplateId.HasValue)
+        {
+            doorRightPlan =
+            [
+                new HikiotDoorRightPlan { DoorNo = 1, PlanTemplateId = [userRightPlanTemplateId.Value] }
+            ];
+        }
 
         return new HikiotUserUpsertCommand
         {
@@ -25,11 +56,11 @@ public static class HikiotUserCommandFactory
                     PermanentValid = person.PermanentValid,
                     EnableBeginTime = FormatTime(person.EnableBeginTime),
                     EnableEndTime = FormatTime(person.EnableEndTime),
-                    DoorRight = [1],
-                    DoorRightPlan =
-                    [
-                        new HikiotDoorRightPlan { DoorNo = 1, PlanTemplateId = [8] }
-                    ],
+                    // doorRight=1 means "Door 1". Only include it when we also send a doorRightPlan,
+                    // so we do not accidentally overwrite HIKIoT-admin-managed door permissions
+                    // on devices that are not using our plan template.
+                    DoorRight = doorRightPlan is not null ? [1] : [],
+                    DoorRightPlan = doorRightPlan,
                     Password = string.IsNullOrWhiteSpace(password) ? null : password,
                     MaxOpenDoorTime = person.Kind == PersonKind.Visitor ? person.MaxOpenDoorTime : null
                 }
@@ -37,7 +68,8 @@ public static class HikiotUserCommandFactory
         };
     }
 
-    private static string FormatTime(DateTime value) => value.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
+    private static string FormatTime(DateTime value)
+        => value.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
 }
 
 public sealed class HikiotUserUpsertCommand
@@ -75,11 +107,14 @@ public sealed class HikiotUserInfo
     [JsonPropertyName("enableEndTime")]
     public string EnableEndTime { get; init; } = string.Empty;
 
-    [JsonPropertyName("doorRightPlan")]
-    public List<HikiotDoorRightPlan> DoorRightPlan { get; init; } = [];
-
+    /// <summary>Omit from payload when empty so we don't clear HIKIoT-admin-managed door rights.</summary>
     [JsonPropertyName("doorRight")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public List<int> DoorRight { get; init; } = [];
+
+    [JsonPropertyName("doorRightPlan")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<HikiotDoorRightPlan>? DoorRightPlan { get; init; }
 
     [JsonPropertyName("password")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

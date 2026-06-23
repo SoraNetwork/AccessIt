@@ -11,7 +11,7 @@ public static class IssuanceWorkflowBuilder
             throw new InvalidOperationException("The selected device does not support access people.");
 
         var steps = new List<IssuanceStepType>();
-        if (device.SupportsUserRightPlanTemplate && !device.HasAllDayTemplate)
+        if (device.SupportsUserRightPlanTemplate && (device.AllDayTemplateId == null || !device.HasAllDayTemplate))
             steps.Add(IssuanceStepType.EnsureAllDayTemplate);
 
         steps.Add(IssuanceStepType.UpsertUser);

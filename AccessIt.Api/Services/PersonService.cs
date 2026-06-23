@@ -139,7 +139,7 @@ public sealed class PersonService(
 
     public async Task SetPasswordAsync(Guid personId, string password, string actorUserId, CancellationToken cancellationToken = default)
     {
-        if (password.Length is < 4 or > 6) throw new ArgumentOutOfRangeException(nameof(password), "密码长度必须为 4 到 6 位。");
+        if (password.Length is < 4 or > 8) throw new ArgumentOutOfRangeException(nameof(password), "密码长度必须为 4 到 8 位。");
         var person = await LoadPersonAsync(personId, cancellationToken);
         var record = await db.DevicePasswords.SingleOrDefaultAsync(x => x.AccessPersonId == personId, cancellationToken);
         if (record is null)
@@ -181,9 +181,15 @@ public sealed class PersonService(
         await db.SaveChangesAsync(cancellationToken);
         if (person.Kind == PersonKind.Employee)
         {
-            // Deleting a local employee must revoke AccessIt-managed device authority, but does
-            // not silently remove the independent HIKIoT team member. That remains explicit.
             await authorityIssuance.RevokeEmployeeAsync(person, actorUserId, cancellationToken);
+            // Then delete device-level credentials
+            var devices = await db.AccessDevices.Where(x => x.IsManaged && x.SupportsUserInfo).ToListAsync(cancellationToken);
+            foreach (var device in devices)
+            {
+                foreach (var face in person.FaceAssets) await hikiot.DeleteFaceAsync(device.DeviceSerial, person.EmployeeNo, cancellationToken);
+                foreach (var card in person.Cards.Where(x => !x.IsVirtual)) await hikiot.DeleteCardAsync(device.DeviceSerial, card.CardNo, cancellationToken);
+                await hikiot.DeleteUserAsync(device.DeviceSerial, person.EmployeeNo, cancellationToken);
+            }
         }
         else
         {
@@ -236,7 +242,7 @@ public sealed class PersonService(
         var failures = new List<string>();
         foreach (var device in targetDevices)
         {
-            if (device.SupportsUserRightPlanTemplate && !device.HasAllDayTemplate)
+            if (device.SupportsUserRightPlanTemplate && (device.AllDayTemplateId == null || !device.HasAllDayTemplate))
             {
                 var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
                 if (!template.Succeeded)
@@ -245,11 +251,12 @@ public sealed class PersonService(
                     continue;
                 }
                 device.HasAllDayTemplate = true;
+                device.AllDayTemplateId = 8;
             }
 
             // The documented password channel is the device-direct user upsert. It is deliberately
             // limited to pure-password-capable devices and does not write a password to the team.
-            var result = await hikiot.UpsertUserAsync(device.DeviceSerial, person, password, cancellationToken);
+            var result = await hikiot.UpsertUserAsync(device.DeviceSerial, person, password, device.SupportsUserRightPlanTemplate ? device.AllDayTemplateId : null, cancellationToken);
             if (!result.Succeeded)
             {
                 failures.Add($"{device.DeviceSerial}: {result.Code} {result.Message}{(string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : $": {result.Detail}")}");

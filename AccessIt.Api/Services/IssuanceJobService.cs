@@ -264,7 +264,7 @@ public sealed class IssuanceJobService(
         return job.Type switch
         {
             IssuanceStepType.EnsureAllDayTemplate => await EnsureTemplateAsync(device, cancellationToken),
-            IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, device.SupportsPurePassword ? await GetPasswordAsync(person.Id, cancellationToken) : null, cancellationToken),
+            IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, device.SupportsPurePassword ? await GetPasswordAsync(person.Id, cancellationToken) : null, device.SupportsUserRightPlanTemplate ? device.AllDayTemplateId : null, cancellationToken),
             IssuanceStepType.UpsertCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, false, null, cancellationToken),
             IssuanceStepType.UpsertFace => await ExecuteFaceAsync(device.DeviceSerial, person, job.RelatedEntityId, false, cancellationToken),
             IssuanceStepType.DeleteCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, true, job.CardNoOverride, cancellationToken),
@@ -283,7 +283,11 @@ public sealed class IssuanceJobService(
     private async Task<HikiotOperationResult> EnsureTemplateAsync(AccessDevice device, CancellationToken cancellationToken)
     {
         var result = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
-        if (result.Succeeded) device.HasAllDayTemplate = true;
+        if (result.Succeeded)
+        {
+            device.HasAllDayTemplate = true;
+            device.AllDayTemplateId = 8;
+        }
         return result;
     }
 

@@ -194,6 +194,9 @@ public sealed class StandardAuthorityIssuanceService(
         bool revoking,
         CancellationToken cancellationToken)
     {
+        // Give HIKIoT a short moment to create the person-device mappings
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+
         var remote = await ReadPersonDevicesAsync(person.HikiotPersonNo!, devices, cancellationToken);
         ApplyRemoteState(remote, devices, grants);
         await db.SaveChangesAsync(cancellationToken);
@@ -237,7 +240,17 @@ public sealed class StandardAuthorityIssuanceService(
         var pending = 0;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            if (attempt > 0) await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            if (attempt > 0)
+            {
+                var delaySeconds = attempt switch
+                {
+                    1 => 2,
+                    2 => 2,
+                    3 => 2,
+                    _ => 5
+                };
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+            }
             remote = await ReadPersonDevicesAsync(person.HikiotPersonNo!, devices, cancellationToken);
             ApplyRemoteState(remote, devices, grants);
             await db.SaveChangesAsync(cancellationToken);

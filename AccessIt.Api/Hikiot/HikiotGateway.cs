@@ -133,8 +133,13 @@ public sealed class HikiotGateway(
         return new HikiotIdentificationResult(response.Code == 0, response.Code, response.Message, id, response.Detail);
     }
 
-    public Task<HikiotIdentificationResult> AddTeamFaceAsync(string personNo, FaceAsset face, CancellationToken cancellationToken = default)
-        => AddTeamIdentificationAsync(personNo, HikiotIdentificationType.FaceUrl, BuildFaceUrl(face.PublicToken), cancellationToken);
+    public async Task<HikiotIdentificationResult> AddTeamFaceAsync(string personNo, FaceAsset face, CancellationToken cancellationToken = default)
+    {
+        var detect = await FaceDetectAsync(personNo, BuildFaceUrl(face.PublicToken), cancellationToken);
+        if (!detect.Passed)
+            return new HikiotIdentificationResult(false, detect.Code, detect.Message ?? "Face score failure (score below 80)", null, detect.Detail);
+        return await AddTeamIdentificationAsync(personNo, HikiotIdentificationType.FaceUrl, BuildFaceUrl(face.PublicToken), cancellationToken);
+    }
 
     public async Task<HikiotOperationResult> DeleteTeamIdentificationAsync(long identificationId, CancellationToken cancellationToken = default)
     {
@@ -230,8 +235,23 @@ public sealed class HikiotGateway(
         return new HikiotOperationResult(true, 0, "All-day access template is ready.", template.Data?.TraceId ?? week.Data?.TraceId);
     }
 
-    public async Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, CancellationToken cancellationToken = default)
-        => ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/userInfo/addOneRecord", HikiotUserCommandFactory.Create(deviceSerial, person, password), cancellationToken));
+    public async Task<HikiotFaceDetectResult> FaceDetectAsync(string personNo, string imageUrl, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(imageUrl);
+        var response = await PostSecureAsync<JsonElement>("/team/v1/person/faceDetect",
+            new { personNo = personNo.Trim(), image = imageUrl.Trim() }, cancellationToken);
+        double? score = null;
+        if (response.Data is JsonElement data && data.ValueKind == JsonValueKind.Object
+            && data.TryGetProperty("score", out var scoreProp) && scoreProp.ValueKind == JsonValueKind.Number)
+            score = scoreProp.GetDouble();
+        var passed = response.Code == 0 && (score is null || score >= 80);
+        return new HikiotFaceDetectResult(response.Code == 0, response.Code, response.Message, score, passed, response.Detail);
+    }
+
+    public async Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, int? userRightPlanTemplateId = null, CancellationToken cancellationToken = default)
+        => ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/userInfo/addOneRecord",
+            HikiotUserCommandFactory.Create(deviceSerial, person, password, userRightPlanTemplateId), cancellationToken));
 
     public async Task<HikiotOperationResult> UpsertCardAsync(string deviceSerial, AccessPerson person, AccessCard card, CancellationToken cancellationToken = default)
     {
