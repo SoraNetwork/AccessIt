@@ -53,6 +53,10 @@ public sealed class OperationsController(AccessItDbContext db, IIssuanceJobServi
         }
     }
 
+    [HttpGet("hikiot-issue-batches")]
+    public Task<List<HikiotIssueBatch>> HikiotIssueBatches(CancellationToken cancellationToken)
+        => db.HikiotIssueBatches.OrderByDescending(x => x.CreatedAtUtc).Take(200).ToListAsync(cancellationToken);
+
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("visitor-qr/{id:guid}/revoke")]
     public async Task<ActionResult> RevokeQr(Guid id, CancellationToken cancellationToken)

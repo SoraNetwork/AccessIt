@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import api from '../services/api'
-import type { Device, Job } from '../types'
+import type { Device, HikiotIssueBatch, Job } from '../types'
 
 const devices = ref<Device[]>([])
 const jobs = ref<Job[]>([])
+const authorityBatches = ref<HikiotIssueBatch[]>([])
 const connection = ref<{ isAuthorized: boolean; needsReauthorization: boolean; teamNo?: string }>({ isAuthorized: false, needsReauthorization: true })
 
 async function load() {
-  const [deviceResult, jobResult, connectionResult] = await Promise.allSettled([
+  const [deviceResult, jobResult, issueResult, connectionResult] = await Promise.allSettled([
     api.get<Device[]>('/devices'),
     api.get<Job[]>('/jobs?status=Failed'),
+    api.get<HikiotIssueBatch[]>('/hikiot-issue-batches'),
     api.get('/hikiot/connection')
   ])
   if (deviceResult.status === 'fulfilled') devices.value = deviceResult.value.data
   if (jobResult.status === 'fulfilled') jobs.value = jobResult.value.data
+  if (issueResult.status === 'fulfilled') authorityBatches.value = issueResult.value.data
   if (connectionResult.status === 'fulfilled') connection.value = connectionResult.value.data
 }
 
@@ -32,7 +35,8 @@ onMounted(load)
           <span v-else>请在系统设置完成团队授权</span>
         </a-descriptions-item>
         <a-descriptions-item label="已纳管设备">{{ devices.length }} 台</a-descriptions-item>
-        <a-descriptions-item label="失败下发任务">{{ jobs.length }} 个</a-descriptions-item>
+        <a-descriptions-item label="HIKIoT 标准下发"><a-tag color="success">已完成 {{ authorityBatches.filter(x => x.status === 'Succeeded').length }}</a-tag><a-tag v-if="authorityBatches.some(x => x.status === 'Pending')" color="processing">处理中 {{ authorityBatches.filter(x => x.status === 'Pending').length }}</a-tag><a-tag v-if="authorityBatches.some(x => x.status === 'Failed')" color="error">失败 {{ authorityBatches.filter(x => x.status === 'Failed').length }}</a-tag></a-descriptions-item>
+        <a-descriptions-item label="访客设备任务失败">{{ jobs.length }} 个</a-descriptions-item>
       </a-descriptions>
       <a-divider />
       <a-steps direction="vertical" size="small" :current="connection.isAuthorized ? 2 : 0">

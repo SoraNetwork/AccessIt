@@ -13,7 +13,7 @@ const menus = computed(() => {
     { key: '/dashboard', icon: () => h(AppstoreOutlined), label: '工作台' },
     { key: '/people', icon: () => h(TeamOutlined), label: '人员管理' },
     { key: '/devices', icon: () => h(UnlockOutlined), label: '设备管理' },
-    { key: '/operations', icon: () => h(ControlOutlined), label: '同步与任务' },
+    { key: '/operations', icon: () => h(ControlOutlined), label: '运行监控' },
     { key: '/audit', icon: () => h(AuditOutlined), label: '审计日志' }
   ]
   if (canManageSystem(auth.role)) {

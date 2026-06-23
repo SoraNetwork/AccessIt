@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using AccessIt.Api.Data;
 using AccessIt.Api.Domain;
+using AccessIt.Api.Hikiot;
 using AccessIt.Api.Security;
 
 namespace AccessIt.Api.Services;
@@ -26,6 +27,9 @@ public interface IPersonService
 public sealed class PersonService(
     AccessItDbContext db,
     IIssuanceJobService jobs,
+    IHikiotTeamPeopleService teamPeople,
+    IStandardAuthorityIssuanceService authorityIssuance,
+    IHikiotGateway hikiot,
     ISecretProtector secretProtector,
     IFaceStorageService faceStorage,
     IAuditService audit) : IPersonService
@@ -37,8 +41,11 @@ public sealed class PersonService(
         person.Mobile = input.Mobile;
         db.AccessPeople.Add(person);
         await db.SaveChangesAsync(cancellationToken);
-        // Employees are deliberately not authorized to devices until the explicit HIKIoT team publish action.
-        await audit.WriteAsync(actorUserId, "person.employee.created", "AccessPerson", person.Id, new { person.EmployeeNo, publishRequired = true }, cancellationToken);
+        // Employee changes are published immediately: team member/credentials first, then the
+        // standard authority-config and issued-job path. The input device list is intentionally
+        // ignored because employee policy is all managed access devices.
+        await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
+        await audit.WriteAsync(actorUserId, "person.employee.created", "AccessPerson", person.Id, new { person.EmployeeNo, automaticallyPublished = true }, cancellationToken);
         return person;
     }
 
@@ -111,14 +118,21 @@ public sealed class PersonService(
         var numberChanged = !string.Equals(oldCardNo, newCardNo, StringComparison.Ordinal);
         card.CardNo = newCardNo;
         card.IsVirtual = isVirtual;
-        if (numberChanged) card.HikiotIdentificationId = null;
+        // Keep the managed team-identification id for employee replacements so PublishAsync can
+        // delete the old remote card before adding the new number. Visitors use device-direct cards.
+        if (numberChanged && person.Kind != PersonKind.Employee) card.HikiotIdentificationId = null;
         person.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        var devices = await ActiveDevicesAsync(personId, cancellationToken);
-        if (numberChanged && devices.Count > 0)
-            await jobs.QueueCardReplacementAsync(person, card, oldCardNo, devices, actorUserId, cancellationToken);
-        else if (devices.Count > 0)
-            await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Employee)
+            await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
+        else
+        {
+            var devices = await ActiveDevicesAsync(personId, cancellationToken);
+            if (numberChanged && devices.Count > 0)
+                await jobs.QueueCardReplacementAsync(person, card, oldCardNo, devices, actorUserId, cancellationToken);
+            else if (devices.Count > 0)
+                await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+        }
         await audit.WriteAsync(actorUserId, "person.card.updated", "AccessCard", card.Id, new { person.EmployeeNo, oldCardNo, card.CardNo, card.IsVirtual }, cancellationToken);
         return card;
     }
@@ -137,6 +151,8 @@ public sealed class PersonService(
         record.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
         await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Employee)
+            await DistributeEmployeePasswordAsync(person, password, actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.password.updated", "AccessPerson", personId, null, cancellationToken);
     }
 
@@ -163,7 +179,16 @@ public sealed class PersonService(
             foreach (var share in shares) share.RevokedAtUtc = now;
         }
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueDeleteAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Employee)
+        {
+            // Deleting a local employee must revoke AccessIt-managed device authority, but does
+            // not silently remove the independent HIKIoT team member. That remains explicit.
+            await authorityIssuance.RevokeEmployeeAsync(person, actorUserId, cancellationToken);
+        }
+        else
+        {
+            await jobs.QueueDeleteAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        }
         await audit.WriteAsync(actorUserId, "person.delete.requested", "AccessPerson", personId, new { person.EmployeeNo }, cancellationToken);
     }
 
@@ -194,8 +219,55 @@ public sealed class PersonService(
 
     private async Task QueueCurrentGrantsAsync(AccessPerson person, string actorUserId, CancellationToken cancellationToken)
     {
+        if (person.Kind == PersonKind.Employee)
+        {
+            await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
+            return;
+        }
         var devices = await ActiveDevicesAsync(person.Id, cancellationToken);
         if (devices.Count > 0) await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+    }
+
+    private async Task DistributeEmployeePasswordAsync(AccessPerson person, string password, string actorUserId, CancellationToken cancellationToken)
+    {
+        var devices = await ActiveDevicesAsync(person.Id, cancellationToken);
+        var targetDevices = devices.Where(x => x.IsManaged && x.SupportsUserInfo && x.SupportsPurePassword).DistinctBy(x => x.Id).ToList();
+        var traces = new List<object>();
+        var failures = new List<string>();
+        foreach (var device in targetDevices)
+        {
+            if (device.SupportsUserRightPlanTemplate && !device.HasAllDayTemplate)
+            {
+                var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
+                if (!template.Succeeded)
+                {
+                    failures.Add($"{device.DeviceSerial}: unable to initialize access template ({template.Code} {template.Message})");
+                    continue;
+                }
+                device.HasAllDayTemplate = true;
+            }
+
+            // The documented password channel is the device-direct user upsert. It is deliberately
+            // limited to pure-password-capable devices and does not write a password to the team.
+            var result = await hikiot.UpsertUserAsync(device.DeviceSerial, person, password, cancellationToken);
+            if (!result.Succeeded)
+            {
+                failures.Add($"{device.DeviceSerial}: {result.Code} {result.Message}{(string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : $": {result.Detail}")}");
+                continue;
+            }
+            traces.Add(new { device.DeviceSerial, result.TraceId });
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        await audit.WriteAsync(actorUserId, "person.password.device-issued", "AccessPerson", person.Id, new
+        {
+            person.EmployeeNo,
+            targetedDeviceCount = targetDevices.Count,
+            unsupportedDeviceCount = devices.Count - targetDevices.Count,
+            traces,
+            failures
+        }, cancellationToken);
+        if (failures.Count > 0)
+            throw new InvalidOperationException($"Password was saved but could not be issued to every compatible device: {string.Join("; ", failures)}");
     }
 
     private async Task<long> NextSequenceAsync(PersonKind kind, CancellationToken cancellationToken)

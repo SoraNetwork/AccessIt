@@ -8,6 +8,15 @@ public class DeviceGrant
     public Guid AccessDeviceId { get; set; }
     public AccessDevice AccessDevice { get; set; } = null!;
     public bool IsActive { get; set; } = true;
+    // Standard HIKIoT authority-config / person-device state. These replace employee direct-device issuance.
+    public string? HikiotAuthorityConfigId { get; set; }
+    public long? HikiotPersonDeviceId { get; set; }
+    public string? HikiotIssueBatchNo { get; set; }
+    public int? HikiotInfoStatus { get; set; }
+    public bool? HikiotIsSupported { get; set; }
+    public bool? HikiotIsSending { get; set; }
+    public string? HikiotLastFailedReason { get; set; }
+    public DateTime? HikiotStatusCheckedAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 

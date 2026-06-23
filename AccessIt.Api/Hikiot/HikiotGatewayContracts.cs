@@ -31,6 +31,11 @@ public interface IHikiotGateway
     Task<HikiotQrCodeResult> GenerateVisitorQrAsync(string deviceSerial, string cardNo, int expireMinutes, int maxOpenTimes, CancellationToken cancellationToken = default);
     Task<HikiotOperationResult> OpenDoorAsync(string resourceSerial, CancellationToken cancellationToken = default);
     Task<HikiotPeopleSearchResult> SearchPeopleAsync(string deviceSerial, int page, int size, string? keyword, CancellationToken cancellationToken = default);
+    Task<HikiotAuthorityConfigResult> SaveAuthorityConfigAsync(HikiotAuthorityConfigRequest request, CancellationToken cancellationToken = default);
+    Task<HikiotOperationResult> DeleteAuthorityConfigAsync(string configId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<HikiotPersonDevice>> GetPersonDevicesAsync(string personNo, IReadOnlyCollection<string>? deviceSerials, int page, int size, CancellationToken cancellationToken = default);
+    Task<HikiotIssueBatchResult> SelectIssueAsync(IReadOnlyCollection<long> personDeviceIds, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<HikiotIssueBatchDetail>> GetIssueBatchDetailsAsync(string batchNo, int page, int size, CancellationToken cancellationToken = default);
 }
 
 public sealed record HikiotConnectionStatus(bool IsAuthorized, bool NeedsReauthorization, string? TeamNo, string? DefaultDepartmentNo, DateTime? UserTokenExpiresAtUtc, string? LastError);
@@ -50,6 +55,12 @@ public sealed record HikiotTeamPersonCreateResult(bool Succeeded, int Code, stri
 public enum HikiotIdentificationType { Card = 1, FaceUrl = 3 }
 public sealed record HikiotIdentification(long Id, HikiotIdentificationType Type, string Content);
 public sealed record HikiotIdentificationResult(bool Succeeded, int Code, string Message, long? IdentificationId, string? Detail = null);
+public sealed record HikiotAuthorityConfigRequest(string? ConfigId, string ConfigName, string ConfigDescription, string PersonNo, string DeviceSerial, int? TimePlanId = null);
+public sealed record HikiotAuthorityConfigResult(bool Succeeded, int Code, string Message, string? ConfigId, string? Detail = null);
+public sealed record HikiotCredentialIssueState(string Credential, int? InfoStatus, bool? IsSupported, bool? IsSending, string? LastFailedReason);
+public sealed record HikiotPersonDevice(long Id, string PersonNo, string DeviceSerial, int? InfoStatus, bool? IsSupported, bool? IsSending, string? LastFailedReason, IReadOnlyList<HikiotCredentialIssueState> CredentialStates);
+public sealed record HikiotIssueBatchResult(bool Succeeded, int Code, string Message, string? BatchNo, string? Detail = null);
+public sealed record HikiotIssueBatchDetail(long? PersonDeviceId, string? Status, bool? Succeeded, string? FailureReason);
 
 public sealed class HikiotEnvelope<T>
 {

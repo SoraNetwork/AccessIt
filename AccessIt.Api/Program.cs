@@ -29,6 +29,7 @@ builder.Services.AddScoped<IIdentityService, IdentityService>();
 builder.Services.AddScoped<IHikiotGateway, HikiotGateway>();
 builder.Services.AddScoped<IAuditService, AuditService>();
 builder.Services.AddScoped<IIssuanceJobService, IssuanceJobService>();
+builder.Services.AddScoped<IStandardAuthorityIssuanceService, StandardAuthorityIssuanceService>();
 builder.Services.AddScoped<IFaceStorageService, FaceStorageService>();
 builder.Services.AddScoped<IPersonService, PersonService>();
 builder.Services.AddScoped<IDeviceService, DeviceService>();
@@ -36,6 +37,7 @@ builder.Services.AddScoped<IDeviceSyncService, DeviceSyncService>();
 builder.Services.AddScoped<IVisitorQrService, VisitorQrService>();
 builder.Services.AddScoped<IHikiotTeamPeopleService, HikiotTeamPeopleService>();
 builder.Services.AddHostedService<IssuanceJobWorker>();
+builder.Services.AddHostedService<HikiotIssueReconcileWorker>();
 builder.Services.AddHostedService<VisitorExpiryWorker>();
 
 var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOptions();

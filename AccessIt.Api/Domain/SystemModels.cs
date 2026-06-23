@@ -130,6 +130,18 @@ public class IssuanceJob
     public DateTime? CompletedAtUtc { get; set; }
 }
 
+public class HikiotIssueBatch
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string BatchNo { get; set; } = string.Empty;
+    public Guid AccessPersonId { get; set; }
+    public string? DeviceSerial { get; set; }
+    public string Status { get; set; } = "Submitted";
+    public string? FailureReason { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? CheckedAtUtc { get; set; }
+}
+
 public class SyncRun
 {
     public Guid Id { get; set; } = Guid.NewGuid();

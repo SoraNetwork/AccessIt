@@ -38,6 +38,13 @@ public sealed class VisitorQrService(
         if (!hasGrant) throw new InvalidOperationException("Visitor is not authorized for the selected device.");
         if (!device.SupportsUserInfo || !device.SupportsCardInfo)
             throw new InvalidOperationException("The selected device does not support visitor QR cards.");
+
+        var now = timeProvider.GetUtcNow();
+        var visitorEnd = new DateTimeOffset(visitor.EnableEndTime).ToUniversalTime();
+        var maximumMinutes = (int)Math.Floor((visitorEnd - now).TotalMinutes);
+        if (maximumMinutes < 5) throw new InvalidOperationException("Visitor access has expired or will expire in less than five minutes.");
+        expireMinutes = Math.Clamp(expireMinutes, 5, Math.Min(10080, maximumMinutes));
+
         var card = visitor.Cards.FirstOrDefault(x => x.IsVirtual);
         if (card is null)
         {
@@ -57,16 +64,23 @@ public sealed class VisitorQrService(
             await db.SaveChangesAsync(cancellationToken);
         }
         var user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
-        if (!user.Succeeded) throw new InvalidOperationException($"Unable to issue visitor to the device: {user.Message}");
+        // HasAllDayTemplate is a local cache. A device reset or a prior failed initialization can
+        // make it stale; HIK reports that as the generic 160103 setting error. Rebuild our managed
+        // all-day template once and retry the visitor user before reporting the real device error.
+        if (!user.Succeeded && device.SupportsUserRightPlanTemplate && user.Code == 160103)
+        {
+            var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
+            if (!template.Succeeded) throw new InvalidOperationException($"Unable to restore the device access template: {template.Code} {template.Message}{FormatDetail(template.Detail)}");
+            device.HasAllDayTemplate = true;
+            await db.SaveChangesAsync(cancellationToken);
+            user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
+        }
+        if (!user.Succeeded) throw new InvalidOperationException($"Unable to issue visitor to the device: {user.Code} {user.Message}{FormatDetail(user.Detail)}");
         var issuedCard = await hikiot.UpsertCardAsync(device.DeviceSerial, visitor, card, cancellationToken);
-        if (!issuedCard.Succeeded) throw new InvalidOperationException($"Unable to issue the visitor QR card to the device: {issuedCard.Message}");
+        if (!issuedCard.Succeeded) throw new InvalidOperationException($"Unable to issue the visitor QR card to the device: {issuedCard.Code} {issuedCard.Message}{FormatDetail(issuedCard.Detail)}");
+        await WaitForVirtualCardAsync(device.DeviceSerial, visitor.EmployeeNo, cancellationToken);
         await audit.WriteAsync(hostUserId, "visitor.virtual-card.issued", "AccessCard", card.Id, new { visitor.EmployeeNo, device.DeviceSerial, issuedCard.TraceId }, cancellationToken);
 
-        var now = timeProvider.GetUtcNow();
-        var visitorEnd = new DateTimeOffset(visitor.EnableEndTime).ToUniversalTime();
-        var maximumMinutes = (int)Math.Floor((visitorEnd - now).TotalMinutes);
-        if (maximumMinutes < 5) throw new InvalidOperationException("Visitor access has expired or will expire in less than five minutes.");
-        expireMinutes = Math.Clamp(expireMinutes, 5, Math.Min(10080, maximumMinutes));
         var result = await hikiot.GenerateVisitorQrAsync(device.DeviceSerial, card.CardNo, expireMinutes, maxOpenTimes, cancellationToken);
         if (!result.Succeeded || string.IsNullOrWhiteSpace(result.QrCode) || result.ExpiresAtUtc is null)
             throw new InvalidOperationException($"二维码生成失败：{result.Message}");
@@ -124,4 +138,21 @@ public sealed class VisitorQrService(
         }
         return candidate;
     }
+
+    private async Task WaitForVirtualCardAsync(string deviceSerial, string employeeNo, CancellationToken cancellationToken)
+    {
+        // Device-direct calls acknowledge receipt with a traceId before the hardware has committed
+        // the card. QR generation is stricter and refuses that short window, hence the former
+        // intermittent “issue a virtual card first” failure.
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var people = await hikiot.SearchPeopleAsync(deviceSerial, 1, 20, employeeNo, cancellationToken);
+            var person = people.People.SingleOrDefault(x => x.EmployeeNo == employeeNo);
+            if (people.Succeeded && person is not null && person.CardCount > 0) return;
+            if (attempt < 7) await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
+        }
+        throw new InvalidOperationException("The device has not confirmed the visitor virtual card yet. Check the device online state and retry; a QR code was not generated.");
+    }
+
+    private static string FormatDetail(string? detail) => string.IsNullOrWhiteSpace(detail) ? string.Empty : $": {detail}";
 }

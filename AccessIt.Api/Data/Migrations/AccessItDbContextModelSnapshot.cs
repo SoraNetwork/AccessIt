@@ -291,6 +291,30 @@ namespace AccessIt.Api.Data.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("HikiotAuthorityConfigId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("HikiotInfoStatus")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool?>("HikiotIsSending")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool?>("HikiotIsSupported")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HikiotIssueBatchNo")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HikiotLastFailedReason")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("HikiotPersonDeviceId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("HikiotStatusCheckedAtUtc")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("IsActive")
                         .HasColumnType("INTEGER");
 
@@ -458,6 +482,47 @@ namespace AccessIt.Api.Data.Migrations
                             Id = 1,
                             NeedsReauthorization = true
                         });
+                });
+
+            modelBuilder.Entity("AccessIt.Api.Domain.HikiotIssueBatch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AccessPersonId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BatchNo")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("CheckedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DeviceSerial")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FailureReason")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccessPersonId", "CreatedAtUtc");
+
+                    b.HasIndex("BatchNo")
+                        .IsUnique();
+
+                    b.ToTable("HikiotIssueBatches");
                 });
 
             modelBuilder.Entity("AccessIt.Api.Domain.IssuanceJob", b =>

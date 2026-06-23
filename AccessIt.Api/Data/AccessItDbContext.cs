@@ -15,6 +15,7 @@ public class AccessItDbContext(DbContextOptions<AccessItDbContext> options) : Db
     public DbSet<FaceAsset> FaceAssets => Set<FaceAsset>();
     public DbSet<DevicePassword> DevicePasswords => Set<DevicePassword>();
     public DbSet<IssuanceJob> IssuanceJobs => Set<IssuanceJob>();
+    public DbSet<HikiotIssueBatch> HikiotIssueBatches => Set<HikiotIssueBatch>();
     public DbSet<SyncRun> SyncRuns => Set<SyncRun>();
     public DbSet<SyncConflict> SyncConflicts => Set<SyncConflict>();
     public DbSet<VisitorQrShare> VisitorQrShares => Set<VisitorQrShare>();
@@ -47,6 +48,14 @@ public class AccessItDbContext(DbContextOptions<AccessItDbContext> options) : Db
             entity.HasIndex(x => new { x.AccessPersonId, x.AccessDeviceId }).IsUnique();
             entity.HasOne(x => x.AccessPerson).WithMany(x => x.DeviceGrants).HasForeignKey(x => x.AccessPersonId);
             entity.HasOne(x => x.AccessDevice).WithMany(x => x.DeviceGrants).HasForeignKey(x => x.AccessDeviceId);
+        });
+
+        modelBuilder.Entity<HikiotIssueBatch>(entity =>
+        {
+            entity.HasIndex(x => x.BatchNo).IsUnique();
+            entity.HasIndex(x => new { x.AccessPersonId, x.CreatedAtUtc });
+            entity.Property(x => x.BatchNo).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.Status).HasMaxLength(32).IsRequired();
         });
 
         modelBuilder.Entity<AccessCard>(entity =>

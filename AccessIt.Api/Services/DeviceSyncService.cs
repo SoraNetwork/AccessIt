@@ -12,7 +12,7 @@ public interface IDeviceSyncService
     Task ResolveAsync(Guid conflictId, SyncConflictResolution resolution, string actorUserId, CancellationToken cancellationToken = default);
 }
 
-public sealed class DeviceSyncService(AccessItDbContext db, IHikiotGateway hikiot, IIssuanceJobService jobs, IAuditService audit) : IDeviceSyncService
+public sealed class DeviceSyncService(AccessItDbContext db, IHikiotGateway hikiot, IIssuanceJobService jobs, IHikiotTeamPeopleService teamPeople, IAuditService audit) : IDeviceSyncService
 {
     public async Task<SyncRun> SyncAsync(Guid deviceId, string actorUserId, CancellationToken cancellationToken = default)
     {
@@ -77,11 +77,18 @@ public sealed class DeviceSyncService(AccessItDbContext db, IHikiotGateway hikio
             var person = await db.AccessPeople.Include(x => x.DeviceGrants).Include(x => x.Cards).Include(x => x.FaceAssets).SingleAsync(x => x.Id == personId, cancellationToken);
             if (resolution == SyncConflictResolution.KeepLocal)
             {
-                var run = await db.SyncRuns.FindAsync([conflict.SyncRunId], cancellationToken);
-                if (run is not null)
+                if (person.Kind == PersonKind.Employee)
                 {
-                    var granted = await db.DeviceGrants.Where(x => x.AccessPersonId == person.Id && x.AccessDeviceId == run.AccessDeviceId).Select(x => x.AccessDevice).ToListAsync(cancellationToken);
-                    await jobs.QueueUpsertAsync(person, granted, actorUserId, cancellationToken);
+                    await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
+                }
+                else
+                {
+                    var run = await db.SyncRuns.FindAsync([conflict.SyncRunId], cancellationToken);
+                    if (run is not null)
+                    {
+                        var granted = await db.DeviceGrants.Where(x => x.AccessPersonId == person.Id && x.AccessDeviceId == run.AccessDeviceId).Select(x => x.AccessDevice).ToListAsync(cancellationToken);
+                        await jobs.QueueUpsertAsync(person, granted, actorUserId, cancellationToken);
+                    }
                 }
             }
             else

@@ -28,13 +28,15 @@ public sealed class IssuanceJobService(
 
     public async Task QueueUpsertAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
     {
+        if (person.Kind == PersonKind.Employee)
+            throw new InvalidOperationException("Employee issuance uses HIKIoT authority configuration, not the direct-device job queue.");
         var cards = person.Cards.ToList();
         var face = person.FaceAssets.OrderByDescending(x => x.CreatedAtUtc).FirstOrDefault();
         var password = await db.DevicePasswords.SingleOrDefaultAsync(x => x.AccessPersonId == person.Id, cancellationToken);
         foreach (var device in devices.Where(x => x.IsManaged).DistinctBy(x => x.Id))
         {
             var workflowId = Guid.NewGuid();
-            var steps = IssuanceWorkflowBuilder.BuildUpsertSteps(device, cards.Count > 0, face is not null, password is not null);
+            var steps = IssuanceWorkflowBuilder.BuildUpsertSteps(device, cards.Count > 0, face is not null, password is not null && device.SupportsPurePassword);
             var index = 0;
             foreach (var type in steps)
             {
@@ -54,6 +56,8 @@ public sealed class IssuanceJobService(
 
     public async Task QueueDeleteAsync(AccessPerson person, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
     {
+        if (person.Kind == PersonKind.Employee)
+            throw new InvalidOperationException("Employee revocation uses HIKIoT authority configuration, not the direct-device job queue.");
         var cards = person.Cards.ToList();
         var faces = person.FaceAssets.ToList();
         foreach (var device in devices.Where(x => x.IsManaged).DistinctBy(x => x.Id))
@@ -71,6 +75,8 @@ public sealed class IssuanceJobService(
 
     public async Task QueueCardReplacementAsync(AccessPerson person, AccessCard card, string oldCardNo, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default)
     {
+        if (person.Kind == PersonKind.Employee)
+            throw new InvalidOperationException("Employee card changes are published through the HIKIoT team and authority workflow.");
         ArgumentException.ThrowIfNullOrWhiteSpace(oldCardNo);
         foreach (var device in devices.Where(x => x.IsManaged && x.SupportsCardInfo).DistinctBy(x => x.Id))
         {
@@ -137,6 +143,20 @@ public sealed class IssuanceJobService(
             }
         }
         if (job is null) return false;
+
+        if (job.AccessPersonId is Guid legacyPersonId)
+        {
+            var kind = await db.AccessPeople.Where(x => x.Id == legacyPersonId).Select(x => (PersonKind?)x.Kind).SingleOrDefaultAsync(cancellationToken);
+            if (kind == PersonKind.Employee)
+            {
+                job.Status = IssuanceJobStatus.Cancelled;
+                job.FailureMessage = "Superseded: employee issuance now uses HIKIoT authority configuration and issued-job status tracking.";
+                job.CompletedAtUtc = timeProvider.GetUtcNow().UtcDateTime;
+                await db.SaveChangesAsync(cancellationToken);
+                await audit.WriteAsync(null, "issuance.cancelled", "IssuanceJob", job.Id, new { job.Type, reason = "employee-authority-workflow" }, cancellationToken);
+                return true;
+            }
+        }
 
         job.Status = IssuanceJobStatus.Running;
         job.AttemptCount++;
@@ -244,7 +264,7 @@ public sealed class IssuanceJobService(
         return job.Type switch
         {
             IssuanceStepType.EnsureAllDayTemplate => await EnsureTemplateAsync(device, cancellationToken),
-            IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, await GetPasswordAsync(person.Id, cancellationToken), cancellationToken),
+            IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, device.SupportsPurePassword ? await GetPasswordAsync(person.Id, cancellationToken) : null, cancellationToken),
             IssuanceStepType.UpsertCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, false, null, cancellationToken),
             IssuanceStepType.UpsertFace => await ExecuteFaceAsync(device.DeviceSerial, person, job.RelatedEntityId, false, cancellationToken),
             IssuanceStepType.DeleteCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, true, job.CardNoOverride, cancellationToken),

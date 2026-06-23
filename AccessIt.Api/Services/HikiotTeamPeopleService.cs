@@ -9,7 +9,7 @@ namespace AccessIt.Api.Services;
 
 public sealed record SourceSyncCounts(int Read, int Created, int Updated, int Skipped, int Conflicts);
 public sealed record ExternalPeopleSyncResult(SourceSyncCounts Hikiot, SourceSyncCounts DingTalk, DirectorySyncResult Directory);
-public sealed record HikiotTeamPublishResult(string PersonNo, bool CreatedInTeam, int DeviceCount, int CardCount, bool FacePublished);
+public sealed record HikiotTeamPublishResult(string PersonNo, bool CreatedInTeam, int DeviceCount, int CardCount, bool FacePublished, HikiotAuthorityIssueResult AuthorityIssue);
 
 public interface IHikiotTeamPeopleService
 {
@@ -23,7 +23,7 @@ public sealed class HikiotTeamPeopleService(
     IHikiotGateway hikiot,
     IDingTalkGateway dingTalk,
     IIdentityService identity,
-    IIssuanceJobService jobs,
+    IStandardAuthorityIssuanceService authorityIssuance,
     IAuditService audit) : IHikiotTeamPeopleService
 {
     private static readonly Regex MainlandPhone = new("^1[3-9]\\d{9}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -174,17 +174,24 @@ public sealed class HikiotTeamPeopleService(
         }
         person.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.hikiot.published", "AccessPerson", person.Id, new { person.EmployeeNo, teamPersonNo, created, deviceCount = devices.Count, cardCount = cards.Count, hasFace = localFace is not null }, cancellationToken);
-        return new HikiotTeamPublishResult(teamPersonNo, created, devices.Count, cards.Count, localFace is not null);
+        var issue = await authorityIssuance.PublishEmployeeAsync(person, devices, actorUserId, cancellationToken);
+        await audit.WriteAsync(actorUserId, "person.hikiot.published", "AccessPerson", person.Id, new
+        {
+            person.EmployeeNo, teamPersonNo, created, deviceCount = devices.Count, cardCount = cards.Count,
+            hasFace = localFace is not null, issue.ConfirmedCount, issue.PendingCount, issue.Failures
+        }, cancellationToken);
+        return new HikiotTeamPublishResult(teamPersonNo, created, devices.Count, cards.Count, localFace is not null, issue);
     }
 
     public async Task RemoveFromTeamAsync(Guid personId, string actorUserId, CancellationToken cancellationToken = default)
     {
-        var person = await db.AccessPeople.SingleOrDefaultAsync(x => x.Id == personId, cancellationToken) ?? throw new KeyNotFoundException("Person was not found.");
+        var person = await db.AccessPeople.Include(x => x.DeviceGrants).SingleOrDefaultAsync(x => x.Id == personId, cancellationToken) ?? throw new KeyNotFoundException("Person was not found.");
         if (person.Kind != PersonKind.Employee) throw new InvalidOperationException("Visitors are never stored in the HIKIoT team.");
         if (string.IsNullOrWhiteSpace(person.HikiotPersonNo)) throw new InvalidOperationException("This employee has not been published to the HIKIoT team.");
         var personNo = person.HikiotPersonNo;
+        var revocation = await authorityIssuance.RevokeEmployeeAsync(person, actorUserId, cancellationToken);
+        if (revocation.Failures.Count > 0 || revocation.PendingCount > 0)
+            throw new InvalidOperationException("The employee's device permissions have not been fully revoked, so the HIKIoT team member was kept. Review the authority issue status and retry.");
         var result = await hikiot.RemoveTeamPersonAsync(personNo, cancellationToken);
         if (!result.Succeeded) throw new InvalidOperationException($"Unable to remove HIKIoT team member: {result.Code} {result.Message}");
         person.HikiotPersonNo = null;
