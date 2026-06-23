@@ -1,0 +1,117 @@
+name: Deploy AccessIt Backend
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_PATH: AccessIt.Api/AccessIt.Api.csproj
+  PUBLISH_DIR: ${{ github.workspace }}/publish
+  PACKAGE_NAME: AccessIt.Api-Release-linux-x64.tar.gz
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore the application
+        run: dotnet restore "$PROJECT_PATH"
+
+      - name: Publish the application
+        run: |
+          dotnet publish "$PROJECT_PATH" \
+            -f net10.0 \
+            -c Release \
+            -r linux-x64 \
+            --self-contained false \
+            /p:PublishSingleFile=true \
+            /p:SourceRevisionId="${{ github.sha }}" \
+            -o "$PUBLISH_DIR"
+
+      - name: Remove debug symbols
+        run: rm -f "$PUBLISH_DIR"/*.pdb
+
+      - name: Upload build artifacts for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: AccessIt.Api-Release-linux-x64
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+
+      - name: Pack publish output
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -czf "$GITHUB_WORKSPACE/dist/$PACKAGE_NAME" -C "$PUBLISH_DIR" .
+
+      - name: Upload package to private OSS
+        id: transfer
+        uses: xcube-studio/sync2oss@Vfiletransfer
+        with:
+          accessKeyId: ${{ secrets.ALIYUN_ACCESSKEYID }}
+          accessKeySecret: ${{ secrets.ALIYUN_ACCESSKEYSECRET }}
+          endpoint: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
+          bucketName: ${{ secrets.ALIYUN_OSS_BUCKETNAME }}
+          region: ${{ secrets.ALIYUN_OSS_REGION }}
+          localPath: ${{ github.workspace }}/dist/AccessIt.Api-Release-linux-x64.tar.gz
+          objectKey: deploy/backend/AccessIt.Api-Release-linux-x64.tar.gz
+          overwrite: true
+          expiresInSeconds: 3600
+
+      - name: Deploy package on remote server
+        uses: appleboy/ssh-action@v1
+        env:
+          PACKAGE_URL: ${{ steps.transfer.outputs.downloadUrl }}
+          APP_DIR: ${{ vars.ACCESSIT_APP_DIR }}
+          APP_USER: ${{ vars.ACCESSIT_APP_USER }}
+          SUPERVISOR_SERVICE: ${{ vars.ACCESSIT_SUPERVISOR_SERVICE }}
+        with:
+          host: ${{ secrets.NINGBO_SERVER }}
+          username: ${{ secrets.NINGBO_USERNAME }}
+          password: ${{ secrets.NINGBO_KEY }}
+          envs: PACKAGE_URL,APP_DIR,APP_USER,SUPERVISOR_SERVICE
+          script: |
+            set -euo pipefail
+
+            [ -n "$PACKAGE_URL" ] || { echo "PACKAGE_URL is empty"; exit 1; }
+
+            APP_DIR="${APP_DIR:-/www/AccessIt.Api}"
+            APP_USER="${APP_USER:-Robot_User}"
+            SERVICE_NAME="${SUPERVISOR_SERVICE:-accessit-service}"
+            TMP_DIR="$(mktemp -d /tmp/accessit-api-deploy.XXXXXX)"
+
+            cleanup() {
+              rm -rf "$TMP_DIR"
+            }
+
+            restore_service() {
+              sudo supervisorctl start "$SERVICE_NAME" || true
+            }
+
+            trap cleanup EXIT
+            curl --fail --location --output "$TMP_DIR/release.tar.gz" "$PACKAGE_URL"
+
+            sudo install -d -m 0755 "$APP_DIR"
+            sudo supervisorctl stop "$SERVICE_NAME"
+            trap 'restore_service; cleanup' EXIT
+
+            sudo tar -xzf "$TMP_DIR/release.tar.gz" -C "$APP_DIR"
+            sudo chmod 0755 "$APP_DIR/AccessIt.Api"
+            sudo chown -R "$APP_USER:" "$APP_DIR"
+
+            sudo supervisorctl start "$SERVICE_NAME"
+            trap cleanup EXIT

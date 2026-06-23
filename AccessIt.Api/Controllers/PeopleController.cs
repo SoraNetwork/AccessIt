@@ -10,7 +10,7 @@ namespace AccessIt.Api.Controllers;
 [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)},{nameof(ApplicationRole.Auditor)}")]
 [ApiController]
 [Route("api/people")]
-public sealed class PeopleController(AccessItDbContext db, IPersonService people) : ControllerBase
+public sealed class PeopleController(AccessItDbContext db, IPersonService people, IHikiotTeamPeopleService teamPeople) : ControllerBase
 {
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpGet("/api/directory-users")]
@@ -41,6 +41,22 @@ public sealed class PeopleController(AccessItDbContext db, IPersonService people
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("employees")]
     public Task<AccessPerson> CreateEmployee([FromBody] CreateEmployeeInput input, CancellationToken cancellationToken) => people.CreateEmployeeAsync(input, User.CurrentUserId(), cancellationToken);
+
+    [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
+    [HttpPost("sync-sources")]
+    public Task<ExternalPeopleSyncResult> SyncSources(CancellationToken cancellationToken) => teamPeople.SyncSourcesAsync(User.CurrentUserId(), cancellationToken);
+
+    [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
+    [HttpPost("{id:guid}/hikiot/publish")]
+    public Task<HikiotTeamPublishResult> PublishToHikiot(Guid id, CancellationToken cancellationToken) => teamPeople.PublishAsync(id, User.CurrentUserId(), cancellationToken);
+
+    [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
+    [HttpDelete("{id:guid}/hikiot")]
+    public async Task<ActionResult> RemoveFromHikiot(Guid id, CancellationToken cancellationToken)
+    {
+        await teamPeople.RemoveFromTeamAsync(id, User.CurrentUserId(), cancellationToken);
+        return NoContent();
+    }
 
     [Authorize(Roles = $"{nameof(ApplicationRole.SuperAdmin)},{nameof(ApplicationRole.AccessAdmin)}")]
     [HttpPost("visitors")]

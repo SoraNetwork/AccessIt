@@ -134,7 +134,7 @@ public sealed class DingTalkResponse<T>
     [JsonPropertyName("result")] public T? Result { get; init; }
 }
 public sealed class DingTalkUserToken { [JsonPropertyName("accessToken")] public string? AccessToken { get; init; } }
-public sealed class DingTalkAppToken { [JsonPropertyName("access_token")] public string? AccessToken { get; init; } [JsonPropertyName("expire_in")] public int ExpireIn { get; init; } }
+public sealed class DingTalkAppToken { [JsonPropertyName("accessToken")] public string? AccessToken { get; init; } [JsonPropertyName("expireIn")] public int ExpireIn { get; init; } }
 public sealed class DingTalkMe { [JsonPropertyName("nick")] public string Nick { get; init; } = string.Empty; [JsonPropertyName("openId")] public string? OpenId { get; init; } [JsonPropertyName("unionId")] public string? UnionId { get; init; } [JsonPropertyName("mobile")] public string? Mobile { get; init; } }
 public sealed class DingTalkLegacyUser { [JsonPropertyName("userid")] public string? UserId { get; init; } }
 public sealed class DingTalkDepartment { [JsonPropertyName("dept_id")] public long DeptId { get; init; } }

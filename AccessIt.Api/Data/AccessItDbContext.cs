@@ -29,6 +29,11 @@ public class AccessItDbContext(DbContextOptions<AccessItDbContext> options) : Db
             entity.Property(x => x.EmployeeNo).HasMaxLength(32).IsRequired();
             entity.Property(x => x.Name).HasMaxLength(32).IsRequired();
             entity.Property(x => x.DingTalkUserId).HasMaxLength(128);
+            entity.Property(x => x.HikiotPersonNo).HasMaxLength(32);
+            entity.Property(x => x.HikiotDepartmentNo).HasMaxLength(32);
+            entity.Property(x => x.HikiotJobNumber).HasMaxLength(32);
+            entity.Property(x => x.HikiotJobPosition).HasMaxLength(32);
+            entity.HasIndex(x => x.HikiotPersonNo).IsUnique().HasFilter("\"HikiotPersonNo\" IS NOT NULL");
         });
 
         modelBuilder.Entity<AccessDevice>(entity =>

@@ -37,6 +37,9 @@ namespace AccessIt.Api.Data.Migrations
                     b.Property<bool>("IsVirtual")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("HikiotIdentificationId")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
 
                     b.HasIndex("AccessPersonId");
@@ -117,6 +120,28 @@ namespace AccessIt.Api.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("HikiotDepartmentNo")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("HikiotFaceIdentificationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HikiotJobNumber")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HikiotJobPosition")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HikiotPersonNo")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("HikiotSex")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime>("EnableBeginTime")
                         .HasColumnType("TEXT");
 
@@ -153,6 +178,10 @@ namespace AccessIt.Api.Data.Migrations
 
                     b.HasIndex("EmployeeNo")
                         .IsUnique();
+
+                    b.HasIndex("HikiotPersonNo")
+                        .IsUnique()
+                        .HasFilter("\"HikiotPersonNo\" IS NOT NULL");
 
                     b.ToTable("AccessPeople");
                 });
@@ -318,6 +347,9 @@ namespace AccessIt.Api.Data.Migrations
                     b.Property<int>("Height")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("HikiotIdentificationId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("PublicToken")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -372,6 +404,9 @@ namespace AccessIt.Api.Data.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("AccountNo")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DefaultDepartmentNo")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("AppTokenExpiresAtUtc")

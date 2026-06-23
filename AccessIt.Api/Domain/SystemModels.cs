@@ -61,6 +61,7 @@ public class HikiotConnection
 {
     public int Id { get; set; } = 1;
     public string? TeamNo { get; set; }
+    public string? DefaultDepartmentNo { get; set; }
     public string? AccountNo { get; set; }
     public string? AuthorizedByUserId { get; set; }
     public string? ProtectedAppAccessToken { get; set; }
@@ -94,6 +95,8 @@ public class FaceAsset
     public long ByteLength { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+    // HIKIoT never returns a downloadable face image. This only records the remote team's identification id.
+    public long? HikiotIdentificationId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 

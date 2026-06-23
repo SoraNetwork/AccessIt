@@ -18,6 +18,8 @@ public class AccessCard
     public AccessPerson AccessPerson { get; set; } = null!;
     public string CardNo { get; set; } = string.Empty;
     public bool IsVirtual { get; set; }
+    // The team identification id is retained so an explicitly requested replacement can remove the right remote item.
+    public long? HikiotIdentificationId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 

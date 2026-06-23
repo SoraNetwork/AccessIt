@@ -21,6 +21,13 @@ public class AccessPerson
     public PersonStatus Status { get; set; } = PersonStatus.Active;
     public string? DingTalkUserId { get; set; }
     public string? Mobile { get; set; }
+    // HIKIoT team identifiers are deliberately separate from EmployeeNo, which is used by direct-device APIs.
+    public string? HikiotPersonNo { get; set; }
+    public string? HikiotDepartmentNo { get; set; }
+    public string? HikiotJobNumber { get; set; }
+    public string? HikiotJobPosition { get; set; }
+    public int? HikiotSex { get; set; }
+    public long? HikiotFaceIdentificationId { get; set; }
     public bool PermanentValid { get; set; }
     public DateTime EnableBeginTime { get; set; }
     public DateTime EnableEndTime { get; set; }

@@ -39,21 +39,25 @@ public sealed class VisitorExpiryWorker(IServiceScopeFactory scopeFactory, ILogg
                 await Task.Delay(TimeSpan.FromMinutes(15), stoppingToken);
                 using var scope = scopeFactory.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AccessItDbContext>();
-                var faces = scope.ServiceProvider.GetRequiredService<IFaceStorageService>();
                 var audit = scope.ServiceProvider.GetRequiredService<IAuditService>();
-                var expired = await db.AccessPeople.Include(x => x.FaceAssets)
+                var jobs = scope.ServiceProvider.GetRequiredService<IIssuanceJobService>();
+                var expired = await db.AccessPeople.Include(x => x.FaceAssets).Include(x => x.Cards).Include(x => x.DeviceGrants).ThenInclude(x => x.AccessDevice)
                     .Where(x => x.Kind == PersonKind.Visitor && x.Status == PersonStatus.Active && !x.PermanentValid && x.EnableEndTime < DateTime.Now)
                     .ToListAsync(stoppingToken);
                 foreach (var visitor in expired)
                 {
                     visitor.Status = PersonStatus.Expired;
-                    foreach (var face in visitor.FaceAssets.ToList()) await faces.DeleteAsync(face, stoppingToken);
+                    foreach (var share in await db.VisitorQrShares.Where(x => x.AccessPersonId == visitor.Id && x.RevokedAtUtc == null).ToListAsync(stoppingToken))
+                        share.RevokedAtUtc = DateTime.UtcNow;
                 }
                 if (expired.Count > 0)
                 {
                     await db.SaveChangesAsync(stoppingToken);
                     foreach (var visitor in expired)
+                    {
+                        await jobs.QueueDeleteAsync(visitor, visitor.DeviceGrants.Where(x => x.IsActive).Select(x => x.AccessDevice), null, stoppingToken);
                         await audit.WriteAsync(null, "visitor.expired", "AccessPerson", visitor.Id, new { visitor.EmployeeNo }, stoppingToken);
+                    }
                     logger.LogInformation("Marked {Count} visitors as expired.", expired.Count);
                 }
             }

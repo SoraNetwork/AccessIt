@@ -33,10 +33,9 @@ public sealed class PersonService(
         var person = AccessPerson.CreateEmployee(sequence, input.Name, input.DingTalkUserId);
         person.Mobile = input.Mobile;
         db.AccessPeople.Add(person);
-        var devices = await AssignDevicesAsync(person, input.DeviceIds, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.employee.created", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
+        // Employees are deliberately not authorized to devices until the explicit HIKIoT team publish action.
+        await audit.WriteAsync(actorUserId, "person.employee.created", "AccessPerson", person.Id, new { person.EmployeeNo, publishRequired = true }, cancellationToken);
         return person;
     }
 
@@ -75,8 +74,8 @@ public sealed class PersonService(
         db.AccessCards.Add(card);
         person.Cards.Add(card);
         await db.SaveChangesAsync(cancellationToken);
-        var devices = await ActiveDevicesAsync(personId, cancellationToken);
-        await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Visitor)
+            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.card.added", "AccessCard", card.Id, new { person.EmployeeNo, card.CardNo }, cancellationToken);
         return card;
     }
@@ -94,7 +93,8 @@ public sealed class PersonService(
         record.ProtectedValue = secretProtector.Protect(password);
         record.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Visitor)
+            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.password.updated", "AccessPerson", personId, null, cancellationToken);
     }
 
@@ -105,7 +105,8 @@ public sealed class PersonService(
         var face = await faceStorage.StoreAsync(person, image, cancellationToken);
         person.FaceAssets.Add(face);
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
+        if (person.Kind == PersonKind.Visitor)
+            await jobs.QueueUpsertAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.face.updated", "FaceAsset", face.Id, new { person.EmployeeNo }, cancellationToken);
         return face;
     }
@@ -114,6 +115,12 @@ public sealed class PersonService(
     {
         var person = await LoadPersonAsync(personId, cancellationToken);
         person.Status = PersonStatus.Deleted;
+        if (person.Kind == PersonKind.Visitor)
+        {
+            var now = DateTime.UtcNow;
+            var shares = await db.VisitorQrShares.Where(x => x.AccessPersonId == personId && x.RevokedAtUtc == null).ToListAsync(cancellationToken);
+            foreach (var share in shares) share.RevokedAtUtc = now;
+        }
         await db.SaveChangesAsync(cancellationToken);
         await jobs.QueueDeleteAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
         await audit.WriteAsync(actorUserId, "person.delete.requested", "AccessPerson", personId, new { person.EmployeeNo }, cancellationToken);

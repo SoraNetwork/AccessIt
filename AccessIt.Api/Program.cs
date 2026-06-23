@@ -34,8 +34,8 @@ builder.Services.AddScoped<IPersonService, PersonService>();
 builder.Services.AddScoped<IDeviceService, DeviceService>();
 builder.Services.AddScoped<IDeviceSyncService, DeviceSyncService>();
 builder.Services.AddScoped<IVisitorQrService, VisitorQrService>();
+builder.Services.AddScoped<IHikiotTeamPeopleService, HikiotTeamPeopleService>();
 builder.Services.AddHostedService<IssuanceJobWorker>();
-builder.Services.AddHostedService<DingTalkDirectorySyncWorker>();
 builder.Services.AddHostedService<VisitorExpiryWorker>();
 
 var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOptions();
@@ -62,7 +62,18 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AccessItDbContext>();
-    await db.Database.MigrateAsync();
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseMigration");
+    try
+    {
+        logger.LogInformation("Applying pending database migrations before accepting requests.");
+        await db.Database.MigrateAsync();
+        logger.LogInformation("Database migrations are current.");
+    }
+    catch (Exception exception)
+    {
+        logger.LogCritical(exception, "Database migration failed. The application will not start against a partial schema.");
+        throw;
+    }
 }
 
 app.UseHttpsRedirection();
