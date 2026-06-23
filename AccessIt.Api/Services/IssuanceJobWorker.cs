@@ -4,6 +4,17 @@ public sealed class IssuanceJobWorker(IServiceScopeFactory scopeFactory, ILogger
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try
+        {
+            using var recoveryScope = scopeFactory.CreateScope();
+            var recoveryJobs = recoveryScope.ServiceProvider.GetRequiredService<IIssuanceJobService>();
+            var recovered = await recoveryJobs.RecoverTemplateBlockedWorkflowsAsync(stoppingToken);
+            if (recovered > 0) logger.LogInformation("Recovered {Count} workflows blocked by the legacy template initialization step.", recovered);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unable to recover legacy template-blocked issuance workflows.");
+        }
         while (!stoppingToken.IsCancellationRequested)
         {
             try

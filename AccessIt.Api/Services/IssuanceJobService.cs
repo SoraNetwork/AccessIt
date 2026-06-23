@@ -13,6 +13,7 @@ public interface IIssuanceJobService
     Task QueueCardReplacementAsync(AccessPerson person, AccessCard card, string oldCardNo, IEnumerable<AccessDevice> devices, string? actorUserId, CancellationToken cancellationToken = default);
     Task<bool> ProcessNextAsync(CancellationToken cancellationToken = default);
     Task<int> ProcessPendingForPersonAsync(Guid personId, CancellationToken cancellationToken = default);
+    Task<int> RecoverTemplateBlockedWorkflowsAsync(CancellationToken cancellationToken = default);
     Task RetryAsync(Guid jobId, string actorUserId, CancellationToken cancellationToken = default);
 }
 
@@ -113,8 +114,16 @@ public sealed class IssuanceJobService(
 
             if (predecessorStates.Any(x => x is IssuanceJobStatus.Failed or IssuanceJobStatus.Cancelled))
             {
+                var blocker = await db.IssuanceJobs
+                    .Where(x => x.ParentJobId == candidate.ParentJobId && x.Sequence < candidate.Sequence && (x.Status == IssuanceJobStatus.Failed || x.Status == IssuanceJobStatus.Cancelled))
+                    .OrderBy(x => x.Sequence)
+                    .Select(x => new { x.Type, x.FailureCode, x.FailureMessage })
+                    .FirstOrDefaultAsync(cancellationToken);
                 candidate.Status = IssuanceJobStatus.Cancelled;
-                candidate.FailureMessage = "A preceding issuance step failed.";
+                candidate.FailureCode = blocker?.FailureCode;
+                candidate.FailureMessage = blocker is null
+                    ? "A preceding issuance step failed."
+                    : $"Blocked by {blocker.Type}: {blocker.FailureMessage ?? blocker.FailureCode ?? "unknown failure"}";
                 candidate.CompletedAtUtc = timeProvider.GetUtcNow().UtcDateTime;
                 await db.SaveChangesAsync(cancellationToken);
                 await audit.WriteAsync(null, "issuance.cancelled", "IssuanceJob", candidate.Id, new { candidate.Type }, cancellationToken);
@@ -169,13 +178,45 @@ public sealed class IssuanceJobService(
     {
         var job = await db.IssuanceJobs.FindAsync([jobId], cancellationToken) ?? throw new KeyNotFoundException("Issuance job was not found.");
         if (job.Status == IssuanceJobStatus.Succeeded) throw new InvalidOperationException("Succeeded jobs cannot be retried.");
-        job.Status = IssuanceJobStatus.Pending;
-        job.NextAttemptAtUtc = timeProvider.GetUtcNow().UtcDateTime;
-        job.FailureCode = null;
-        job.FailureMessage = null;
+        var workflow = job.ParentJobId is Guid workflowId
+            ? await db.IssuanceJobs.Where(x => x.ParentJobId == workflowId).ToListAsync(cancellationToken)
+            : [job];
+        foreach (var step in workflow)
+        {
+            step.Status = IssuanceJobStatus.Pending;
+            step.AttemptCount = 0;
+            step.NextAttemptAtUtc = timeProvider.GetUtcNow().UtcDateTime;
+            step.FailureCode = null;
+            step.FailureMessage = null;
+            step.CompletedAtUtc = null;
+        }
         await db.SaveChangesAsync(cancellationToken);
-        await audit.WriteAsync(actorUserId, "issuance.retry", "IssuanceJob", job.Id, null, cancellationToken);
+        await audit.WriteAsync(actorUserId, "issuance.retry", "IssuanceJob", job.Id, new { workflow = workflow.Count }, cancellationToken);
         if (job.AccessPersonId is Guid personId) await ProcessPendingForPersonAsync(personId, cancellationToken);
+    }
+
+    public async Task<int> RecoverTemplateBlockedWorkflowsAsync(CancellationToken cancellationToken = default)
+    {
+        var workflowIds = await db.IssuanceJobs
+            .Where(x => x.ParentJobId != null && x.Type == IssuanceStepType.EnsureAllDayTemplate && (x.Status == IssuanceJobStatus.Failed || x.Status == IssuanceJobStatus.Cancelled))
+            .Select(x => x.ParentJobId!.Value)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        if (workflowIds.Count == 0) return 0;
+
+        var jobs = await db.IssuanceJobs.Where(x => x.ParentJobId != null && workflowIds.Contains(x.ParentJobId.Value)).ToListAsync(cancellationToken);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        foreach (var job in jobs)
+        {
+            job.Status = IssuanceJobStatus.Pending;
+            job.AttemptCount = 0;
+            job.NextAttemptAtUtc = now;
+            job.FailureCode = null;
+            job.FailureMessage = null;
+            job.CompletedAtUtc = null;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        return workflowIds.Count;
     }
 
     private void AddJob(Guid workflowId, int sequence, Guid personId, Guid deviceId, IssuanceStepType type, Guid? relatedEntityId, string? cardNoOverride = null)
