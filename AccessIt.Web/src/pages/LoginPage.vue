@@ -1,17 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import * as dd from 'dingtalk-jsapi'
 import { useAuthStore } from '../stores/auth'
 import { getDingTalkBrowserRedirectUri } from '../utils/dingtalkAuth'
-
-declare global {
-  interface Window {
-    dd?: {
-      ready: (fn: () => void) => void
-      runtime?: { permission?: { requestAuthCode: (args: { corpId: string }) => Promise<{ code: string }> } }
-    }
-  }
-}
 
 const route = useRoute()
 const router = useRouter()
@@ -39,7 +31,7 @@ function loginWeb() {
     return
   }
   const redirectUri = encodeURIComponent(getDingTalkBrowserRedirectUri(window.location.origin))
-  window.location.href = `https://login.dingtalk.com/oauth2/auth?redirect_uri=${redirectUri}&response_type=code&client_id=${appKey}&scope=openid&state=accessit`
+  window.location.href = `https://login.dingtalk.com/oauth2/auth?redirect_uri=${redirectUri}&response_type=code&client_id=${appKey}&scope=openid&state=accessit&prompt=consent`
 }
 
 onMounted(async () => {
@@ -49,15 +41,24 @@ onMounted(async () => {
     return
   }
 
-  const corpId = import.meta.env.VITE_DINGTALK_CORP_ID
-  if (/DingTalk/i.test(navigator.userAgent) && corpId && window.dd?.runtime?.permission) {
-    window.dd.ready(async () => {
+  if (/DingTalk/i.test(navigator.userAgent)) {
+    const corpId = import.meta.env.VITE_DINGTALK_CORP_ID
+    if (!corpId) {
+      error.value = '钉钉端内免登需要配置 VITE_DINGTALK_CORP_ID。'
+      return
+    }
+
+    dd.ready(async () => {
       try {
-        const result = await window.dd!.runtime!.permission!.requestAuthCode({ corpId })
+        const result = await dd.runtime.permission.requestAuthCode({ corpId })
         await finish(result.code, true)
       } catch {
         error.value = '钉钉工作台免登失败。'
       }
+    })
+
+    dd.error(() => {
+      error.value = '钉钉 JSAPI 初始化失败，请检查微应用主页地址和安全域名配置。'
     })
   }
 })
