@@ -79,6 +79,9 @@ namespace AccessIt.Api.Data.Migrations
                     b.Property<bool>("SupportsFace")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("HasAllDayTemplate")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("SupportsPassword")
                         .HasColumnType("INTEGER");
 

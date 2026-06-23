@@ -97,9 +97,9 @@ public sealed class IssuanceJobService(
         await ProcessingGate.WaitAsync(cancellationToken);
         try
         {
-        var now = timeProvider.GetUtcNow().UtcDateTime;
         var candidates = await db.IssuanceJobs
-            .Where(x => x.Status == IssuanceJobStatus.Pending && x.NextAttemptAtUtc <= now && (personId == null || x.AccessPersonId == personId))
+            // Pending is an immediate work state. Do not defer it to a later manual visit to the issuance centre.
+            .Where(x => x.Status == IssuanceJobStatus.Pending && (personId == null || x.AccessPersonId == personId))
             .OrderBy(x => x.CreatedAtUtc)
             .Take(50)
             .ToListAsync(cancellationToken);
@@ -145,7 +145,8 @@ public sealed class IssuanceJobService(
             job.Status = IssuanceJobStatus.Pending;
             job.FailureCode = result.Code.ToString();
             job.FailureMessage = result.Message;
-            job.NextAttemptAtUtc = timeProvider.GetUtcNow().AddMinutes(new[] { 1, 5, 15 }[job.AttemptCount - 1]).UtcDateTime;
+            // Retry in this same automatic run. A fourth unsuccessful attempt becomes Failed with the HIK error preserved.
+            job.NextAttemptAtUtc = timeProvider.GetUtcNow().UtcDateTime;
         }
         else
         {
@@ -201,7 +202,7 @@ public sealed class IssuanceJobService(
 
         return job.Type switch
         {
-            IssuanceStepType.EnsureAllDayTemplate => await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken),
+            IssuanceStepType.EnsureAllDayTemplate => await EnsureTemplateAsync(device, cancellationToken),
             IssuanceStepType.UpsertUser => await hikiot.UpsertUserAsync(device.DeviceSerial, person, await GetPasswordAsync(person.Id, cancellationToken), cancellationToken),
             IssuanceStepType.UpsertCard => await ExecuteCardAsync(device.DeviceSerial, person, job.RelatedEntityId, false, null, cancellationToken),
             IssuanceStepType.UpsertFace => await ExecuteFaceAsync(device.DeviceSerial, person, job.RelatedEntityId, false, cancellationToken),
@@ -216,6 +217,13 @@ public sealed class IssuanceJobService(
     {
         var password = await db.DevicePasswords.SingleOrDefaultAsync(x => x.AccessPersonId == personId, cancellationToken);
         return password is null ? null : secretProtector.Unprotect(password.ProtectedValue);
+    }
+
+    private async Task<HikiotOperationResult> EnsureTemplateAsync(AccessDevice device, CancellationToken cancellationToken)
+    {
+        var result = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
+        if (result.Succeeded) device.HasAllDayTemplate = true;
+        return result;
     }
 
     private async Task<HikiotOperationResult> ExecuteCardAsync(string deviceSerial, AccessPerson person, Guid? cardId, bool delete, string? cardNoOverride, CancellationToken cancellationToken)

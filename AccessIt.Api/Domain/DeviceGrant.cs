@@ -37,6 +37,8 @@ public class AccessDevice
     public bool SupportsPurePassword { get; set; }
     public bool SupportsRemoteOpen { get; set; }
     public bool SupportsUserRightPlanTemplate { get; set; }
+    // The all-day plan/template used by direct user issuance has been initialized on this device.
+    public bool HasAllDayTemplate { get; set; }
     public DateTime? LastSyncedAtUtc { get; set; }
     public ICollection<DeviceGrant> DeviceGrants { get; set; } = new List<DeviceGrant>();
 }

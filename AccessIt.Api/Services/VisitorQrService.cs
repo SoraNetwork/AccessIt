@@ -49,10 +49,12 @@ public sealed class VisitorQrService(
 
         // QR generation requires the card to exist on the target device. Make the prerequisite explicit and synchronous,
         // rather than asking an operator to infer whether a background issuance job has already completed.
-        if (device.SupportsUserRightPlanTemplate)
+        if (device.SupportsUserRightPlanTemplate && !device.HasAllDayTemplate)
         {
             var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
             if (!template.Succeeded) throw new InvalidOperationException($"Unable to prepare the device access template: {template.Message}");
+            device.HasAllDayTemplate = true;
+            await db.SaveChangesAsync(cancellationToken);
         }
         var user = await hikiot.UpsertUserAsync(device.DeviceSerial, visitor, null, cancellationToken);
         if (!user.Succeeded) throw new InvalidOperationException($"Unable to issue visitor to the device: {user.Message}");

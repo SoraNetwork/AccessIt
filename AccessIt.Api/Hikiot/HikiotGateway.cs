@@ -224,9 +224,10 @@ public sealed class HikiotGateway(
     {
         var commands = HikiotAllDayTemplateFactory.Create(deviceSerial);
         var week = await PostSecureAsync<HikiotTraceData>("/device/direct/v1/timePlanAdd/userWeekPlan", commands.WeekPlan, cancellationToken);
-        if (week.Code != 0) return ToOperation(week);
+        if (week.Code != 0 && !IsAlreadyExists(week)) return ToOperation(week);
         var template = await PostSecureAsync<HikiotTraceData>("/device/direct/v1/timePlanAdd/userPlanTemplate", commands.UserTemplate, cancellationToken);
-        return ToOperation(template);
+        if (template.Code != 0 && !IsAlreadyExists(template)) return ToOperation(template);
+        return new HikiotOperationResult(true, 0, "All-day access template is ready.", template.Data?.TraceId ?? week.Data?.TraceId);
     }
 
     public async Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, CancellationToken cancellationToken = default)
@@ -524,6 +525,15 @@ public sealed class HikiotGateway(
 
     private static HikiotOperationResult ToOperation<T>(HikiotEnvelope<T> response)
         => new(response.Code == 0, response.Code, response.Message, response.Data is HikiotTraceData trace ? trace.TraceId : null, response.Detail);
+
+    private static bool IsAlreadyExists<T>(HikiotEnvelope<T> response)
+    {
+        var text = $"{response.Message} {response.Detail}";
+        return text.Contains("already exist", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("already exists", StringComparison.OrdinalIgnoreCase)
+               || text.Contains("已存在", StringComparison.Ordinal)
+               || text.Contains("重复", StringComparison.Ordinal);
+    }
 
     private static DateTime? ParseDate(string? value) => DateTime.TryParse(value, out var parsed) ? parsed : null;
 }
