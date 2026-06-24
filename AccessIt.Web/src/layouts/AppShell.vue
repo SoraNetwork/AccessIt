@@ -1,45 +1,30 @@
 <script setup lang="ts">
 import { computed, h, ref } from 'vue'
 import { useRouter, RouterView } from 'vue-router'
-import { AppstoreOutlined, AuditOutlined, ControlOutlined, LogoutOutlined, SettingOutlined, TeamOutlined, UnlockOutlined, UserOutlined } from '@ant-design/icons-vue'
+import { LogoutOutlined, TeamOutlined, UserAddOutlined, ApiOutlined } from '@ant-design/icons-vue'
 import { useAuthStore } from '../stores/auth'
-import { canManageSystem } from '../utils/permissions'
 
 const router = useRouter()
 const auth = useAuthStore()
 const collapsed = ref(false)
-const menus = computed(() => {
-  const items = [
-    { key: '/dashboard', icon: () => h(AppstoreOutlined), label: '工作台' },
-    { key: '/people', icon: () => h(TeamOutlined), label: '人员管理' },
-    { key: '/devices', icon: () => h(UnlockOutlined), label: '设备管理' },
-    { key: '/operations', icon: () => h(ControlOutlined), label: '运行监控' },
-    { key: '/audit', icon: () => h(AuditOutlined), label: '审计日志' }
-  ]
-  if (canManageSystem(auth.role)) {
-    items.push(
-      { key: '/settings', icon: () => h(SettingOutlined), label: '系统设置' },
-      { key: '/users', icon: () => h(UserOutlined), label: '系统用户' }
-    )
-  }
-  return items
-})
+
+const menus = computed(() => [
+  { key: '/dashboard', icon: () => h(TeamOutlined), label: '人员' },
+  { key: '/visitors', icon: () => h(UserAddOutlined), label: '访客' },
+  { key: '/hikiot', icon: () => h(ApiOutlined), label: '海康连接' },
+])
 
 function leave() {
   auth.logout()
   router.push('/login')
-}
-
-function onMenuClick(info: { key: string | number }) {
-  router.push(String(info.key))
 }
 </script>
 
 <template>
   <a-layout class="shell">
     <a-layout-sider v-model:collapsed="collapsed" collapsible breakpoint="lg" class="sider">
-      <div class="brand"><router-link to="/dashboard">开一个门</router-link></div>
-      <a-menu theme="dark" mode="inline" :selected-keys="[router.currentRoute.value.path]" :items="menus" @click="onMenuClick" />
+      <div class="brand"><router-link to="/">开一个门</router-link></div>
+      <a-menu theme="dark" mode="inline" :selected-keys="[router.currentRoute.value.path]" :items="menus" @click="({ key }: { key: string }) => router.push(key)" />
     </a-layout-sider>
     <a-layout>
       <a-layout-header class="header">

@@ -10,25 +10,29 @@ using AccessIt.Api.Security;
 
 namespace AccessIt.Api.Hikiot;
 
-public sealed class HikiotGateway(
+/// <summary>
+/// HIKIoT 网关 —— 重构后只保留 App/User Token 的获取、缓存与自动刷新，以及第三方 OAuth 授权闭环。
+/// <para>
+/// 这是整个 HIKIoT 集成的"总闸"：所有后续业务 API 都必须先经过 <see cref="GetAuthorizedTokensAsync"/>
+/// 拿到有效的 App-Access-Token 与 User-Access-Token。业务方法已在本次清理中移除，重新开发时
+/// 在本类中按需新增（复用 <see cref="GetSecureAsync{T}"/> / <see cref="PostSecureAsync{T}"/> 即可自动带上刷新后的 token）。
+/// </para>
+/// </summary>
+public class HikiotGateway(
     AccessItDbContext db,
     IHttpClientFactory httpClientFactory,
     ISecretProtector secretProtector,
     IOptions<HikiotOptions> options,
     TimeProvider timeProvider) : IHikiotGateway
 {
+    /// <summary>串行化 token 刷新，避免并发请求重复换 token。</summary>
     private static readonly SemaphoreSlim TokenGate = new(1, 1);
-    private static readonly SemaphoreSlim TeamReadGate = new(1, 1);
-    private static DateTimeOffset NextTeamReadAtUtc = DateTimeOffset.MinValue;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNameCaseInsensitive = true,
-        NumberHandling = JsonNumberHandling.AllowReadingFromString
+        PropertyNameCaseInsensitive = true
     };
-    private static readonly JsonSerializerOptions WriteJsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
+
     private readonly HikiotOptions _options = options.Value;
 
     public async Task<HikiotConnectionStatus> GetConnectionStatusAsync(CancellationToken cancellationToken = default)
@@ -41,116 +45,6 @@ public sealed class HikiotGateway(
             connection.DefaultDepartmentNo,
             connection.UserTokenExpiresAtUtc,
             connection.LastError);
-    }
-
-    public async Task<IReadOnlyList<HikiotTeamDepartment>> GetTeamDepartmentsAsync(CancellationToken cancellationToken = default)
-    {
-        var departments = new List<HikiotTeamDepartment>();
-        var visitedParents = new HashSet<string?>(StringComparer.Ordinal);
-        await ReadDepartmentsAsync(null, departments, visitedParents, cancellationToken);
-        return departments;
-    }
-
-    public async Task SetDefaultDepartmentAsync(string departmentNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(departmentNo);
-        var departments = await GetTeamDepartmentsAsync(cancellationToken);
-        if (!departments.Any(x => x.DepartmentNo == departmentNo.Trim()))
-            throw new InvalidOperationException("The selected HIKIoT department does not exist in the authorized team.");
-        var connection = await GetConnectionAsync(cancellationToken);
-        connection.DefaultDepartmentNo = departmentNo.Trim();
-        await db.SaveChangesAsync(cancellationToken);
-    }
-
-    public async Task<IReadOnlyList<HikiotTeamPerson>> GetTeamPeopleAsync(CancellationToken cancellationToken = default)
-    {
-        var departments = await GetTeamDepartmentsAsync(cancellationToken);
-        var people = new Dictionary<string, HikiotTeamPerson>(StringComparer.Ordinal);
-        foreach (var department in departments.Where(x => x.HasPeople || x.IsLeaf).DistinctBy(x => x.DepartmentNo))
-        {
-            var page = 1;
-            while (true)
-            {
-                await WaitForTeamReadSlotAsync(cancellationToken);
-                var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(department.DepartmentNo)}&hasLeafDepart=true&page={page}&size=50", cancellationToken);
-                EnsureSuccess(response);
-                var current = ParseTeamPersonPage(response.Data);
-                foreach (var person in current) if (!string.IsNullOrWhiteSpace(person.PersonNo)) people[person.PersonNo] = ToTeamPerson(person);
-                if (current.Count < 50) break;
-                page++;
-            }
-        }
-        return people.Values.OrderBy(x => x.Name).ThenBy(x => x.PersonNo).ToList();
-    }
-
-    public async Task<HikiotTeamPerson?> GetTeamPersonAsync(string personNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        await WaitForTeamReadSlotAsync(cancellationToken);
-        var response = await GetSecureAsync<HikiotTeamPersonPayload>($"/team/v1/person/getByPersonNo?personNo={Uri.EscapeDataString(personNo)}", cancellationToken);
-        if (response.Code == 150201) return null;
-        EnsureSuccess(response);
-        return response.Data is null ? null : ToTeamPerson(response.Data);
-    }
-
-    public async Task<HikiotTeamPersonCreateResult> CreateTeamPersonAsync(HikiotTeamPersonUpsert request, CancellationToken cancellationToken = default)
-    {
-        ValidateTeamPersonUpsert(request, false);
-        var sex = request.Sex is 1 or 2 ? request.Sex : null;
-        var body = new { personName = request.Name.Trim(), departNo = request.DepartmentNo.Trim(), phone = request.Phone.Trim(), jobNumber = NullIfWhiteSpace(request.JobNumber), jobPosition = NullIfWhiteSpace(request.JobPosition), sex, idCard = NullIfWhiteSpace(request.IdCard) };
-        var response = await PostSecureAsync<HikiotTeamPersonCreatedData>("/team/v1/person/add", body, cancellationToken);
-        return new HikiotTeamPersonCreateResult(response.Code == 0, response.Code, response.Message, response.Data?.PersonNo, response.Detail);
-    }
-
-    public async Task<HikiotOperationResult> UpdateTeamPersonAsync(HikiotTeamPersonUpsert request, CancellationToken cancellationToken = default)
-    {
-        ValidateTeamPersonUpsert(request, true);
-        var sex = request.Sex is 1 or 2 ? request.Sex : null;
-        // HIKIoT's update API intentionally does not accept phone, department or job number. Keep those immutable remotely.
-        var body = new { personNo = request.PersonNo!.Trim(), personName = request.Name.Trim(), jobPosition = NullIfWhiteSpace(request.JobPosition), sex };
-        return ToOperation(await PostSecureAsync<JsonElement>("/team/v1/person/update", body, cancellationToken));
-    }
-
-    public async Task<HikiotOperationResult> RemoveTeamPersonAsync(string personNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        return ToOperation(await PostSecureAsync<JsonElement>("/team/v1/person/removeByNo", new { personNo = personNo.Trim() }, cancellationToken));
-    }
-
-    public async Task<IReadOnlyList<HikiotIdentification>> GetTeamIdentificationsAsync(string personNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        await WaitForTeamReadSlotAsync(cancellationToken);
-        var response = await GetSecureAsync<List<HikiotIdentificationPayload>>($"/team/v1/person/listIdentifications?personNo={Uri.EscapeDataString(personNo)}", cancellationToken);
-        EnsureSuccess(response);
-        return (response.Data ?? []).Where(x => x.Type is (int)HikiotIdentificationType.Card or (int)HikiotIdentificationType.FaceUrl)
-            .Select(x => new HikiotIdentification(x.Id, (HikiotIdentificationType)x.Type, x.Content)).ToList();
-    }
-
-    public async Task<HikiotIdentificationResult> AddTeamIdentificationAsync(string personNo, HikiotIdentificationType type, string content, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        ArgumentException.ThrowIfNullOrWhiteSpace(content);
-        if (type is not (HikiotIdentificationType.Card or HikiotIdentificationType.FaceUrl)) throw new ArgumentOutOfRangeException(nameof(type));
-        var response = await PostSecureAsync<JsonElement>("/team/v1/person/addIdentification", new { personNo = personNo.Trim(), type = (int)type, content = content.Trim() }, cancellationToken);
-        var id = TryReadLong(response.Data, "id");
-        if (response.Code == 0 && id is null)
-            id = (await GetTeamIdentificationsAsync(personNo, cancellationToken)).SingleOrDefault(x => x.Type == type && x.Content == content.Trim())?.Id;
-        return new HikiotIdentificationResult(response.Code == 0, response.Code, response.Message, id, response.Detail);
-    }
-
-    public async Task<HikiotIdentificationResult> AddTeamFaceAsync(string personNo, FaceAsset face, CancellationToken cancellationToken = default)
-    {
-        var detect = await FaceDetectAsync(personNo, BuildFaceUrl(face.PublicToken), cancellationToken);
-        if (!detect.Passed)
-            return new HikiotIdentificationResult(false, detect.Code, detect.Message ?? "Face score failure (score below 80)", null, detect.Detail);
-        return await AddTeamIdentificationAsync(personNo, HikiotIdentificationType.FaceUrl, BuildFaceUrl(face.PublicToken), cancellationToken);
-    }
-
-    public async Task<HikiotOperationResult> DeleteTeamIdentificationAsync(long identificationId, CancellationToken cancellationToken = default)
-    {
-        if (identificationId <= 0) throw new ArgumentOutOfRangeException(nameof(identificationId));
-        return ToOperation(await PostSecureAsync<JsonElement>("/team/v1/person/deleteIdentification", new { id = identificationId }, cancellationToken));
     }
 
     public async Task<string> BeginAuthorizationAsync(string requestedByUserId, CancellationToken cancellationToken = default)
@@ -176,6 +70,7 @@ public sealed class HikiotGateway(
         if (authorization is null || authorization.ExpiresAtUtc < now)
             throw new InvalidOperationException("HIKIoT authorization state is invalid or expired.");
 
+        // code2Token 只需 App Token，无需 User Token。
         var appToken = await GetAppTokenAsync(cancellationToken);
         var client = CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, $"/auth/third/code2Token?authCode={Uri.EscapeDataString(authCode)}");
@@ -198,339 +93,22 @@ public sealed class HikiotGateway(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<HikiotDiscoveredDevice>> DiscoverDevicesAsync(CancellationToken cancellationToken = default)
-    {
-        var groups = new List<HikiotGroupPageItem>();
-        var page = 1;
-        while (true)
-        {
-            var response = await GetSecureAsync<List<HikiotGroupPageItem>>($"/issue/v1/deviceGroup/page?page={page}&size=20&containsDefault=true", cancellationToken);
-            EnsureSuccess(response);
-            var data = response.Data ?? [];
-            groups.AddRange(data);
-            if (data.Count == 0 || groups.Count >= response.Count) break;
-            page++;
-        }
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  Token 缓存机制（AT/UT）—— 保留，供后续业务方法复用
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  设计要点：
+    //  1) App Token 与 User Token 都持久化在 HikiotConnection 单行（Id=1），密文存储（SecretProtector）。
+    //  2) App Token：剩余有效期 < 5 分钟时刷新，先尝试 refreshAppToken，失败回退到 exchangeAppToken。
+    //  3) User Token：剩余有效期 < 1 天时刷新，用 refreshUserAccessToken；失败则置 NeedsReauthorization=true，
+    //     必须人工重新走 OAuth 授权。
+    //  4) TokenGate 串行化，确保同一时刻只有一个刷新请求。
+    //  5) GetSecureAsync/PostSecureAsync 是所有业务请求的统一入口，自动注入双 token。
 
-        var discovered = new List<HikiotDiscoveredDevice>();
-        foreach (var group in groups)
-        foreach (var serial in group.DeviceSerialList.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            var capacityResponse = await GetSecureAsync<HikiotCapacityPayload>($"/issue/v1/device/capacityList?deviceSerial={Uri.EscapeDataString(serial)}", cancellationToken);
-            EnsureSuccess(capacityResponse);
-            var capacity = capacityResponse.Data ?? new HikiotCapacityPayload();
-            discovered.Add(new HikiotDiscoveredDevice(group.DeviceGroupNo, group.DeviceGroupName, serial, new HikiotDeviceCapacity(
-                capacity.SupportUserInfo,
-                capacity.SupportCardInfo,
-                capacity.SupportFace,
-                capacity.SupportUserPassword,
-                capacity.SupportPurePwdVerify,
-                capacity.SupportRemoteControlDoor,
-                capacity.SupportUserRightPlanTemplate)));
-        }
-        return discovered;
-    }
-
-    public async Task<HikiotOperationResult> EnsureAllDayTemplateAsync(string deviceSerial, CancellationToken cancellationToken = default)
-    {
-        var commands = HikiotAllDayTemplateFactory.Create(deviceSerial);
-        var week = await PostSecureAsync<HikiotTraceData>("/device/direct/v1/timePlanAdd/userWeekPlan", commands.WeekPlan, cancellationToken);
-        if (week.Code != 0 && !IsAlreadyExists(week)) return ToOperation(week);
-        var template = await PostSecureAsync<HikiotTraceData>("/device/direct/v1/timePlanAdd/userPlanTemplate", commands.UserTemplate, cancellationToken);
-        if (template.Code != 0 && !IsAlreadyExists(template)) return ToOperation(template);
-        return new HikiotOperationResult(true, 0, "All-day access template is ready.", template.Data?.TraceId ?? week.Data?.TraceId);
-    }
-
-    public async Task<HikiotFaceDetectResult> FaceDetectAsync(string personNo, string imageUrl, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        ArgumentException.ThrowIfNullOrWhiteSpace(imageUrl);
-        var response = await PostSecureAsync<JsonElement>("/team/v1/person/faceDetect",
-            new { personNo = personNo.Trim(), image = imageUrl.Trim() }, cancellationToken);
-        double? score = null;
-        if (response.Data is JsonElement data && data.ValueKind == JsonValueKind.Object
-            && data.TryGetProperty("score", out var scoreProp) && scoreProp.ValueKind == JsonValueKind.Number)
-            score = scoreProp.GetDouble();
-        var passed = response.Code == 0 && (score is null || score >= 80);
-        return new HikiotFaceDetectResult(response.Code == 0, response.Code, response.Message, score, passed, response.Detail);
-    }
-
-    public async Task<HikiotOperationResult> UpsertUserAsync(string deviceSerial, AccessPerson person, string? password, int? userRightPlanTemplateId = null, CancellationToken cancellationToken = default)
-        => ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/userInfo/addOneRecord",
-            HikiotUserCommandFactory.Create(deviceSerial, person, password, userRightPlanTemplateId), cancellationToken));
-
-    public async Task<HikiotOperationResult> UpsertCardAsync(string deviceSerial, AccessPerson person, AccessCard card, CancellationToken cancellationToken = default)
-    {
-        var body = new { deviceSerial, payload = new { cardInfo = new { employeeNo = person.EmployeeNo, cardNo = card.CardNo, cardType = "normalCard" } } };
-        return ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/cardInfo/addOneRecord", body, cancellationToken));
-    }
-
-    public async Task<HikiotOperationResult> UpsertFaceAsync(string deviceSerial, AccessPerson person, FaceAsset face, CancellationToken cancellationToken = default)
-    {
-        var body = new { deviceSerial, payload = new { faceInfo = new { employeeNo = person.EmployeeNo, faceURL = BuildFaceUrl(face.PublicToken), faceLibType = "blackFD", faceDbId = 1 } } };
-        return ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/faceAccess/addOneRecord", body, cancellationToken));
-    }
-
-    public async Task<HikiotOperationResult> DeleteUserAsync(string deviceSerial, string employeeNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(employeeNo);
-        var body = new { deviceSerial, payload = new { userInfo = new { employeeNo } } };
-        return ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/userInfo/deleteByKey", body, cancellationToken));
-    }
-
-    public async Task<HikiotOperationResult> DeleteCardAsync(string deviceSerial, string cardNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(cardNo);
-        var body = new { deviceSerial, payload = new { cardInfo = new[] { new { cardNo } } } };
-        return ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/cardInfo/batchDeleteByKey", body, cancellationToken));
-    }
-
-    public async Task<HikiotOperationResult> DeleteFaceAsync(string deviceSerial, string employeeNo, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(employeeNo);
-        var body = new { deviceSerial, payload = new { faceInfo = new { employeeNo, faceDbId = 1, faceLibType = "blackFD" } } };
-        return ToOperation(await PostSecureAsync<HikiotTraceData>("/device/direct/v1/faceAccess/deleteByKey", body, cancellationToken));
-    }
-
-    public async Task<HikiotQrCodeResult> GenerateVisitorQrAsync(string deviceSerial, string cardNo, int expireMinutes, int maxOpenTimes, CancellationToken cancellationToken = default)
-    {
-        if (expireMinutes is < 5 or > 10080) throw new ArgumentOutOfRangeException(nameof(expireMinutes));
-        if (maxOpenTimes is < 1 or > 255) throw new ArgumentOutOfRangeException(nameof(maxOpenTimes));
-        var body = new { deviceSerial, payload = new { cardNo, expireMinutes, isValidTimes = true, maxOpenTimes } };
-        var response = await PostSecureAsync<HikiotQrData>("/device/direct/v1/qrCodeInfo/genQrCode", body, cancellationToken);
-        return new HikiotQrCodeResult(response.Code == 0, response.Code, response.Message, response.Data?.TraceId, response.Data?.QrCode,
-            response.Data?.ExpireTime is long ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime : null, response.Detail);
-    }
-
-    public async Task<HikiotOperationResult> OpenDoorAsync(string resourceSerial, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(resourceSerial);
-        var response = await GetSecureAsync<JsonElement>($"/issue/v1/device/openDoor?resourceSerial={Uri.EscapeDataString(resourceSerial)}", cancellationToken);
-        return new HikiotOperationResult(response.Code == 0, response.Code, response.Message, null, response.Detail);
-    }
-
-    public async Task<HikiotPeopleSearchResult> SearchPeopleAsync(string deviceSerial, int page, int size, string? keyword, CancellationToken cancellationToken = default)
-    {
-        if (page < 1 || size is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(size));
-        var body = new { deviceSerial, page, size, keyword = string.IsNullOrWhiteSpace(keyword) ? null : keyword };
-        var response = await PostSecureAsync<List<HikiotUserSearchItem>>("/device/direct/v1/userInfo/search", body, cancellationToken);
-        var people = (response.Data ?? []).Select(x => new HikiotRemotePerson(
-            x.EmployeeNo, x.Name, x.UserType, x.PermanentValid,
-            ParseDate(x.Valid?.BeginTime), ParseDate(x.Valid?.EndTime), x.OpenDoorTime, x.MaxOpenDoorTime, x.NumOfCard, x.NumOfFace)).ToList();
-        return new HikiotPeopleSearchResult(response.Code == 0, response.Code, response.Message, response.Count, people, response.Detail);
-    }
-
-    public async Task<HikiotAuthorityConfigResult> SaveAuthorityConfigAsync(HikiotAuthorityConfigRequest request, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.ConfigName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.ConfigDescription);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.PersonNo);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.DeviceSerial);
-        var path = string.IsNullOrWhiteSpace(request.ConfigId) ? "/issue/v1/authorityConfig/add" : "/issue/v1/authorityConfig/update";
-        object requestBody = string.IsNullOrWhiteSpace(request.ConfigId)
-            ? new
-            {
-                configName = request.ConfigName,
-                configDesc = request.ConfigDescription,
-                selectSubjectType = 1,
-                timePlanId = request.TimePlanId,
-                persons = new[] { new { type = 1, id = request.PersonNo } },
-                devices = new[] { new { type = 1, id = request.DeviceSerial } }
-            }
-            : new
-            {
-                configId = request.ConfigId,
-                configName = request.ConfigName,
-                configDesc = request.ConfigDescription,
-                selectSubjectType = 1,
-                timePlanId = request.TimePlanId,
-                persons = new[] { new { type = 1, id = request.PersonNo } },
-                devices = new[] { new { type = 1, id = request.DeviceSerial } }
-            };
-        var response = await PostSecureAsync<JsonElement>(path, requestBody, cancellationToken);
-        var configId = ReadString(response.Data, "configId") ?? ReadString(response.Data, "id") ?? ReadScalarString(response.Data) ?? request.ConfigId;
-        return new HikiotAuthorityConfigResult(response.Code == 0, response.Code, response.Message, configId, response.Detail);
-    }
-
-    public async Task<HikiotOperationResult> DeleteAuthorityConfigAsync(string configId, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(configId);
-        var response = await GetSecureAsync<JsonElement>($"/issue/v1/authorityConfig/delete?id={Uri.EscapeDataString(configId)}", cancellationToken);
-        return ToOperation(response);
-    }
-
-    public async Task<IReadOnlyList<HikiotPersonDevice>> GetPersonDevicesAsync(string personNo, IReadOnlyCollection<string>? deviceSerials, int page, int size, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(personNo);
-        if (page < 1 || size is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(size));
-        var path = $"/issue/v1/personDevice/page?page={page}&size={size}&personNos={Uri.EscapeDataString(personNo)}";
-        if (deviceSerials is { Count: > 0 }) path += "&deviceSerials=" + Uri.EscapeDataString(string.Join(',', deviceSerials));
-        var response = await GetSecureAsync<JsonElement>(path, cancellationToken);
-        EnsureSuccess(response);
-        var data = response.Data;
-        if (data.ValueKind != JsonValueKind.Array) return [];
-        var result = new List<HikiotPersonDevice>();
-        foreach (var item in data.EnumerateArray())
-        {
-            var id = ReadLong(item, "id");
-            var remotePersonNo = ReadString(item, "personNo") ?? string.Empty;
-            var serial = ReadString(item, "deviceSerial") ?? string.Empty;
-            var states = new[]
-                {
-                    ReadCredentialState(item, "userVO", "person"),
-                    ReadCredentialState(item, "faceVO", "face"),
-                    ReadCredentialState(item, "fingerVO", "fingerprint"),
-                    ReadCredentialState(item, "cardVO", "card"),
-                    ReadCredentialState(item, "passwordVO", "password")
-                }
-                .Where(x => x is not null)
-                .Select(x => x!)
-                .ToList();
-            var state = states.FirstOrDefault(x => x.Credential == "person") ?? states.FirstOrDefault();
-            if (id is long personDeviceId && !string.IsNullOrWhiteSpace(remotePersonNo) && !string.IsNullOrWhiteSpace(serial))
-                result.Add(new HikiotPersonDevice(personDeviceId, remotePersonNo, serial, state?.InfoStatus, state?.IsSupported, state?.IsSending, state?.LastFailedReason, states));
-        }
-        return result;
-    }
-
-    public async Task<HikiotIssueBatchResult> SelectIssueAsync(IReadOnlyCollection<long> personDeviceIds, CancellationToken cancellationToken = default)
-    {
-        if (personDeviceIds.Count == 0) return new HikiotIssueBatchResult(true, 0, "No pending authority changes.", null);
-        if (personDeviceIds.Count > 10) throw new ArgumentOutOfRangeException(nameof(personDeviceIds), "HIKIoT selectIssue accepts at most ten person-device ids.");
-        var response = await PostSecureAsync<JsonElement>("/issue/v1/issuedJob/selectIssue", new { personDeviceIds }, cancellationToken);
-        var batchNo = ReadScalarString(response.Data) ?? ReadString(response.Data, "batchNo");
-        return new HikiotIssueBatchResult(response.Code == 0, response.Code, response.Message, batchNo, response.Detail);
-    }
-
-    public async Task<IReadOnlyList<HikiotIssueBatchDetail>> GetIssueBatchDetailsAsync(string batchNo, int page, int size, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(batchNo);
-        var response = await PostSecureAsync<JsonElement>("/issue/v1/issuedJob/batchDetailPage", new { batchNo, page, size }, cancellationToken);
-        EnsureSuccess(response);
-        var data = response.Data;
-        var array = data.ValueKind == JsonValueKind.Array ? data
-            : data.ValueKind == JsonValueKind.Object && data.TryGetProperty("data", out var nested) && nested.ValueKind == JsonValueKind.Array ? nested
-            : default;
-        if (array.ValueKind != JsonValueKind.Array) return [];
-        return array.EnumerateArray().Select(item => new HikiotIssueBatchDetail(
-            ReadLong(item, "personDeviceId") ?? ReadLong(item, "id"),
-            ReadString(item, "status") ?? ReadString(item, "issueStatus"),
-            ReadBoolean(item, "succeeded") ?? ReadBoolean(item, "success"),
-            ReadString(item, "failureReason") ?? ReadString(item, "lastFailedReason") ?? ReadString(item, "msg"))).ToList();
-    }
-
-    private async Task ReadDepartmentsAsync(string? parentDepartmentNo, List<HikiotTeamDepartment> departments, HashSet<string?> visitedParents, CancellationToken cancellationToken)
-    {
-        if (!visitedParents.Add(parentDepartmentNo)) return;
-        await WaitForTeamReadSlotAsync(cancellationToken);
-        var path = string.IsNullOrWhiteSpace(parentDepartmentNo)
-            ? "/team/v1/depart/getDeparts"
-            : $"/team/v1/depart/getDeparts?departNo={Uri.EscapeDataString(parentDepartmentNo)}";
-        var response = await GetSecureAsync<HikiotTeamDepartmentData>(path, cancellationToken);
-        EnsureSuccess(response);
-        foreach (var department in response.Data?.TeamDepartVOs ?? [])
-        {
-            if (string.IsNullOrWhiteSpace(department.DepartNo) || departments.Any(x => x.DepartmentNo == department.DepartNo)) continue;
-            departments.Add(new HikiotTeamDepartment(department.DepartNo, department.DepartName, department.ParentId, department.IsLeaf, department.HavePerson, department.PersonNum, department.Path));
-            if (!department.IsLeaf) await ReadDepartmentsAsync(department.DepartNo, departments, visitedParents, cancellationToken);
-        }
-    }
-
-    private static List<HikiotTeamPersonPayload> ParseTeamPersonPage(JsonElement? data)
-    {
-        if (data is not JsonElement element || element.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) return [];
-        var candidates = element.ValueKind == JsonValueKind.Array
-            ? new[] { element }
-            : new[] { "personInfoVOList", "list", "records", "data", "persons" }
-                .Where(name => element.TryGetProperty(name, out _))
-                .Select(name => element.GetProperty(name));
-        foreach (var candidate in candidates)
-        {
-            if (candidate.ValueKind != JsonValueKind.Array) continue;
-            var parsed = JsonSerializer.Deserialize<List<HikiotTeamPersonPayload>>(candidate.GetRawText(), JsonOptions);
-            if (parsed is not null) return parsed;
-        }
-        return [];
-    }
-
-    private static HikiotTeamPerson ToTeamPerson(HikiotTeamPersonPayload person)
-        => new(person.PersonNo, person.PersonName, person.Phone, person.TeamNo, person.DepartNo, person.JobNumber, person.JobPosition, person.Sex, person.IsOwner, person.PathName, person.IdCard);
-
-    private static long? TryReadLong(JsonElement? element, string name)
-    {
-        if (element is not JsonElement value || value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(name, out var id)) return null;
-        return id.ValueKind == JsonValueKind.Number && id.TryGetInt64(out var numeric) ? numeric
-            : id.ValueKind == JsonValueKind.String && long.TryParse(id.GetString(), out numeric) ? numeric
-            : null;
-    }
-
-    private static string? ReadScalarString(JsonElement? element)
-        => element is not JsonElement value ? null : value.ValueKind switch
-        {
-            JsonValueKind.String => value.GetString(),
-            JsonValueKind.Number => value.ToString(),
-            _ => null
-        };
-
-    private static string? ReadString(JsonElement? element, string name)
-    {
-        if (element is not JsonElement value || value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(name, out var property)) return null;
-        return property.ValueKind is JsonValueKind.String or JsonValueKind.Number ? property.ToString() : null;
-    }
-
-    private static string? ReadString(JsonElement element, string name) => ReadString((JsonElement?)element, name);
-    private static long? ReadLong(JsonElement element, string name)
-    {
-        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var property)) return null;
-        return property.ValueKind == JsonValueKind.Number && property.TryGetInt64(out var number) ? number
-            : property.ValueKind == JsonValueKind.String && long.TryParse(property.GetString(), out number) ? number : null;
-    }
-    private static bool? ReadBoolean(JsonElement element, string name)
-    {
-        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var property)) return null;
-        return property.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            JsonValueKind.Number when property.TryGetInt64(out var number) => number != 0,
-            JsonValueKind.String when bool.TryParse(property.GetString(), out var parsed) => parsed,
-            JsonValueKind.String when long.TryParse(property.GetString(), out var numeric) => numeric != 0,
-            _ => null
-        };
-    }
-    private static HikiotCredentialIssueState? ReadCredentialState(JsonElement item, string name, string credentialName)
-    {
-        if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty(name, out var credential) || credential.ValueKind != JsonValueKind.Object) return null;
-        var status = ReadLong(credential, "infoStatus") is long value ? (int?)value : null;
-        return new HikiotCredentialIssueState(credentialName, status, ReadBoolean(credential, "isSupport"), ReadBoolean(credential, "isSending"), ReadString(credential, "lastFailedReason"));
-    }
-
-    private static void ValidateTeamPersonUpsert(HikiotTeamPersonUpsert request, bool isUpdate)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.Name);
-        if (isUpdate) ArgumentException.ThrowIfNullOrWhiteSpace(request.PersonNo);
-        else
-        {
-            ArgumentException.ThrowIfNullOrWhiteSpace(request.DepartmentNo);
-            ArgumentException.ThrowIfNullOrWhiteSpace(request.Phone);
-        }
-    }
-
-    private static string? NullIfWhiteSpace(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-
-    private static async Task WaitForTeamReadSlotAsync(CancellationToken cancellationToken)
-    {
-        await TeamReadGate.WaitAsync(cancellationToken);
-        try
-        {
-            var now = DateTimeOffset.UtcNow;
-            var wait = NextTeamReadAtUtc - now;
-            if (wait > TimeSpan.Zero) await Task.Delay(wait, cancellationToken);
-            NextTeamReadAtUtc = DateTimeOffset.UtcNow.AddMilliseconds(650);
-        }
-        finally { TeamReadGate.Release(); }
-    }
-    private async Task<HikiotEnvelope<T>> GetSecureAsync<T>(string relativePath, CancellationToken cancellationToken)
+    /// <summary>
+    /// 业务 GET 请求的统一入口：自动获取（并按需刷新）双 token 后发起请求。
+    /// 重新开发业务 API 时，新增的 GET 方法应统一走这里。
+    /// </summary>
+    protected internal async Task<HikiotEnvelope<T>> GetSecureAsync<T>(string relativePath, CancellationToken cancellationToken = default)
     {
         var tokens = await GetAuthorizedTokensAsync(cancellationToken);
         using var request = new HttpRequestMessage(HttpMethod.Get, relativePath);
@@ -538,14 +116,19 @@ public sealed class HikiotGateway(
         return await SendAsync<T>(CreateClient(), request, cancellationToken);
     }
 
-    private async Task<HikiotEnvelope<T>> PostSecureAsync<T>(string relativePath, object body, CancellationToken cancellationToken)
+    /// <summary>
+    /// 业务 POST 请求的统一入口：自动获取（并按需刷新）双 token 后发起请求。
+    /// 重新开发业务 API 时，新增的 POST 方法应统一走这里。
+    /// </summary>
+    protected internal async Task<HikiotEnvelope<T>> PostSecureAsync<T>(string relativePath, object body, CancellationToken cancellationToken = default)
     {
         var tokens = await GetAuthorizedTokensAsync(cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Post, relativePath) { Content = JsonContent.Create(body, options: WriteJsonOptions) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, relativePath) { Content = JsonContent.Create(body) };
         AddTokens(request, tokens);
         return await SendAsync<T>(CreateClient(), request, cancellationToken);
     }
 
+    /// <summary>取已授权的双 token，并在过期前自动刷新 User Token。</summary>
     private async Task<(string AppToken, string UserToken)> GetAuthorizedTokensAsync(CancellationToken cancellationToken)
     {
         var appToken = await GetAppTokenAsync(cancellationToken);
@@ -585,6 +168,7 @@ public sealed class HikiotGateway(
         return (appToken, secretProtector.Unprotect(connection.ProtectedUserAccessToken)!);
     }
 
+    /// <summary>获取 App Token：缓存未过期直接返回，否则刷新（先 refresh 后 exchange）。</summary>
     private async Task<string> GetAppTokenAsync(CancellationToken cancellationToken)
     {
         ValidateSetup();
@@ -630,11 +214,132 @@ public sealed class HikiotGateway(
         finally { TokenGate.Release(); }
     }
 
+    /// <summary>无需 User Token 的公开 POST（仅 token 接口自身使用）。</summary>
     private async Task<HikiotEnvelope<T>> PostPublicAsync<T>(string relativePath, object body, string? appAccessToken, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, relativePath) { Content = JsonContent.Create(body) };
         if (!string.IsNullOrWhiteSpace(appAccessToken)) request.Headers.Add("App-Access-Token", appAccessToken);
         return await SendAsync<T>(CreateClient(), request, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<HikiotTeamPerson>> GetTeamPeopleAsync(CancellationToken cancellationToken = default)
+    {
+        var connection = await GetConnectionAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(connection.TeamNo)) throw new InvalidOperationException("HIKIoT team is unavailable; authorize the connection first.");
+        var result = new Dictionary<string, HikiotTeamPerson>(StringComparer.OrdinalIgnoreCase);
+        for (var page = 1; page <= 100; page++)
+        {
+            var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(connection.TeamNo)}&page={page}&size=100", cancellationToken);
+            EnsureApiSuccess(response, "读取海康团队人员失败");
+            var entries = GetArray(response.Data, "list", "records", "items", "data");
+            foreach (var item in entries)
+            {
+                var personNo = GetString(item, "personNo", "person_no", "id");
+                var name = GetString(item, "name", "personName");
+                if (!string.IsNullOrWhiteSpace(personNo) && !string.IsNullOrWhiteSpace(name))
+                    result[personNo] = new HikiotTeamPerson(personNo, name, GetString(item, "phone", "mobile"));
+            }
+            if (entries.Count < 100) break;
+        }
+        return result.Values.OrderBy(x => x.Name).ToList();
+    }
+
+    public async Task<string> CreateTeamPersonAsync(string name, string? mobile, CancellationToken cancellationToken = default)
+    {
+        var connection = await GetConnectionAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(connection.TeamNo)) throw new InvalidOperationException("HIKIoT team is unavailable; authorize the connection first.");
+        var response = await PostSecureAsync<JsonElement>("/team/v1/person/add", new { name, phone = mobile, departNo = connection.TeamNo }, cancellationToken);
+        EnsureApiSuccess(response, "创建海康团队人员失败");
+        var personNo = GetString(response.Data, "personNo", "person_no", "id");
+        if (string.IsNullOrWhiteSpace(personNo)) throw new InvalidOperationException("海康未返回人员编号。");
+        return personNo;
+    }
+
+    public async Task AddTeamCardAsync(string personNo, string cardNo, CancellationToken cancellationToken = default)
+    {
+        var response = await PostSecureAsync<JsonElement>("/team/v1/person/addIdentification", new { personNo, identificationType = 1, identification = cardNo }, cancellationToken);
+        EnsureApiSuccess(response, "保存海康团队卡片失败");
+    }
+
+    public async Task AddTeamFaceAsync(string personNo, string faceUrl, CancellationToken cancellationToken = default)
+    {
+        var detect = await PostSecureAsync<JsonElement>("/team/v1/person/faceDetect", new { faceUrl }, cancellationToken);
+        EnsureApiSuccess(detect, "海康人脸质量检测失败");
+        var response = await PostSecureAsync<JsonElement>("/team/v1/person/addIdentification", new { personNo, identificationType = 3, identification = faceUrl }, cancellationToken);
+        EnsureApiSuccess(response, "保存海康团队人脸失败");
+    }
+
+    public async Task<IReadOnlyList<HikiotDoorDevice>> GetDoorDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        var all = new Dictionary<string, HikiotDoorDevice>(StringComparer.OrdinalIgnoreCase);
+        for (var page = 1; page <= 100; page++)
+        {
+            var groups = await GetSecureAsync<JsonElement>($"/issue/v1/deviceGroup/page?page={page}&size=100&containsDefault=true", cancellationToken);
+            EnsureApiSuccess(groups, "读取门禁设备失败");
+            var entries = GetArray(groups.Data, "list", "records", "items", "data");
+            foreach (var item in entries)
+            {
+                foreach (var device in ExpandDevices(item))
+                {
+                    var serial = GetString(device, "deviceSerial", "resourceSerial", "serial");
+                    if (string.IsNullOrWhiteSpace(serial)) continue;
+                    var capacity = await GetSecureAsync<JsonElement>($"/issue/v1/device/capacityList?deviceSerial={Uri.EscapeDataString(serial)}", cancellationToken);
+                    if (capacity.Code != 0) continue;
+                    var text = capacity.Data.ValueKind == JsonValueKind.Undefined ? string.Empty : capacity.Data.GetRawText();
+                    all[serial] = new HikiotDoorDevice(serial, GetString(device, "deviceName", "name") ?? serial,
+                        HasCapability(text, "supportUserInfo"), HasCapability(text, "supportCard"), HasCapability(text, "supportFace"), HasCapability(text, "supportPurePwdVerify"));
+                }
+            }
+            if (entries.Count < 100) break;
+        }
+        return all.Values.Where(x => x.SupportsUserInfo).ToList();
+    }
+
+    public async Task<DeviceIssueResult> UpsertDirectUserAsync(HikiotDoorDevice device, HikiotDirectUser user, CancellationToken cancellationToken = default)
+    {
+        var body = new { deviceSerial = device.Serial, payload = new { userInfo = new { employeeNo = user.EmployeeNo, name = user.Name, userType = user.IsVisitor ? "visitor" : "normal", permanentValid = user.PermanentValid, enableBeginTime = user.BeginUtc.ToString("yyyy-MM-dd'T'HH:mm:ss"), enableEndTime = user.EndUtc.ToString("yyyy-MM-dd'T'HH:mm:ss"), doorRightPlan = new[] { new { doorNo = 1, planTemplateId = new[] { 1 } }, }, doorRight = new[] { 1 }, password = device.SupportsPassword ? user.Password : null, maxOpenDoorTime = user.IsVisitor ? 0 : (int?)null } } };
+        var response = await PostSecureAsync<JsonElement>("/device/direct/v1/userInfo/addOneRecord", body, cancellationToken);
+        return ToIssueResult(device.Serial, response);
+    }
+
+    public async Task<DeviceIssueResult> UpsertDirectCardAsync(HikiotDoorDevice device, string employeeNo, string cardNo, CancellationToken cancellationToken = default)
+    {
+        var response = await PostSecureAsync<JsonElement>("/device/direct/v1/cardInfo/addOneRecord", new { deviceSerial = device.Serial, payload = new { cardInfo = new { employeeNo, cardNo } } }, cancellationToken);
+        return ToIssueResult(device.Serial, response);
+    }
+
+    public async Task<DeviceIssueResult> UpsertDirectFaceAsync(HikiotDoorDevice device, string employeeNo, string faceUrl, CancellationToken cancellationToken = default)
+    {
+        var response = await PostSecureAsync<JsonElement>("/device/direct/v1/faceAccess/addOneRecord", new { deviceSerial = device.Serial, payload = new { faceAccessInfo = new { employeeNo, faceUrl, faceLibType = "blackFD" } } }, cancellationToken);
+        return ToIssueResult(device.Serial, response);
+    }
+
+    public async Task<string?> GenerateVisitorQrAsync(HikiotDoorDevice device, string employeeNo, string cardNo, CancellationToken cancellationToken = default)
+    {
+        var response = await PostSecureAsync<JsonElement>("/device/direct/v1/qrCodeInfo/genQrCode", new { deviceSerial = device.Serial, payload = new { employeeNo, cardNo } }, cancellationToken);
+        if (response.Code != 0) throw new InvalidOperationException($"设备 {device.Serial} 生成访客二维码失败：{response.Message}");
+        return GetString(response.Data, "qrCode", "qrCodeInfo", "content", "data");
+    }
+
+    private static DeviceIssueResult ToIssueResult(string serial, HikiotEnvelope<JsonElement> response) => new(serial, response.Code == 0, response.Code == 0 ? "已接受下发" : $"{response.Code}: {response.Message}");
+    private static void EnsureApiSuccess(HikiotEnvelope<JsonElement> response, string action) { if (response.Code != 0) throw new InvalidOperationException($"{action}：{response.Code} {response.Message}"); }
+    private static bool HasCapability(string json, string name) => json.Contains($"\"{name}\":1", StringComparison.OrdinalIgnoreCase) || json.Contains($"\"{name}\":true", StringComparison.OrdinalIgnoreCase);
+    private static List<JsonElement> GetArray(JsonElement data, params string[] names)
+    {
+        if (data.ValueKind == JsonValueKind.Array) return data.EnumerateArray().ToList();
+        if (data.ValueKind == JsonValueKind.Object) foreach (var name in names) if (data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array) return value.EnumerateArray().ToList();
+        return [];
+    }
+    private static IEnumerable<JsonElement> ExpandDevices(JsonElement item)
+    {
+        yield return item;
+        foreach (var name in new[] { "devices", "deviceList", "resources" }) if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var list) && list.ValueKind == JsonValueKind.Array) foreach (var child in list.EnumerateArray()) yield return child;
+    }
+    private static string? GetString(JsonElement element, params string[] names)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return null;
+        foreach (var name in names) if (element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return value.ToString();
+        return null;
     }
 
     private HttpClient CreateClient()
@@ -660,6 +365,7 @@ public sealed class HikiotGateway(
                ?? new HikiotEnvelope<T> { Code = -1, Message = "HIKIoT returned an empty response." };
     }
 
+    /// <summary>HIKIoT 连接单行（Id=1）。不存在时自动创建为待授权状态。</summary>
     private async Task<HikiotConnection> GetConnectionAsync(CancellationToken cancellationToken)
     {
         var connection = await db.HikiotConnections.SingleOrDefaultAsync(x => x.Id == 1, cancellationToken);
@@ -670,35 +376,9 @@ public sealed class HikiotGateway(
         return connection;
     }
 
-    private string BuildFaceUrl(string publicToken)
-    {
-        if (string.IsNullOrWhiteSpace(_options.PublicBaseUrl))
-            throw new InvalidOperationException("Hikiot:PublicBaseUrl is not configured.");
-        return $"{_options.PublicBaseUrl.TrimEnd('/')}/public/faces/{Uri.EscapeDataString(publicToken)}";
-    }
-
     private void ValidateSetup()
     {
         if (string.IsNullOrWhiteSpace(_options.AppKey) || string.IsNullOrWhiteSpace(_options.AppSecret) || string.IsNullOrWhiteSpace(_options.RedirectUri))
             throw new InvalidOperationException("Hikiot AppKey, AppSecret, and RedirectUri must be configured.");
     }
-
-    private static void EnsureSuccess<T>(HikiotEnvelope<T> response)
-    {
-        if (response.Code != 0) throw new InvalidOperationException($"HIKIoT request failed: {response.Code} {response.Message}");
-    }
-
-    private static HikiotOperationResult ToOperation<T>(HikiotEnvelope<T> response)
-        => new(response.Code == 0, response.Code, response.Message, response.Data is HikiotTraceData trace ? trace.TraceId : null, response.Detail);
-
-    private static bool IsAlreadyExists<T>(HikiotEnvelope<T> response)
-    {
-        var text = $"{response.Message} {response.Detail}";
-        return text.Contains("already exist", StringComparison.OrdinalIgnoreCase)
-               || text.Contains("already exists", StringComparison.OrdinalIgnoreCase)
-               || text.Contains("已存在", StringComparison.Ordinal)
-               || text.Contains("重复", StringComparison.Ordinal);
-    }
-
-    private static DateTime? ParseDate(string? value) => DateTime.TryParse(value, out var parsed) ? parsed : null;
 }

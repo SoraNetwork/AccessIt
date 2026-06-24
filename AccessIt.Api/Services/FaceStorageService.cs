@@ -7,11 +7,34 @@ using AccessIt.Api.Domain;
 
 namespace AccessIt.Api.Services;
 
+/// <summary>
+/// 人脸图片存储服务（通用基础设施）。
+/// <para>
+/// 重构后已与人员领域模型解耦：只负责图片的缩放、压缩、落盘与公开令牌的管理。
+/// 调用方负责把返回的 <see cref="FaceAsset"/> 关联到自己的业务实体上。
+/// </para>
+/// </summary>
 public interface IFaceStorageService
 {
-    Task<FaceAsset> StoreAsync(AccessPerson person, Stream source, CancellationToken cancellationToken = default);
+    Task<FaceAsset> StoreAsync(Stream source, CancellationToken cancellationToken = default);
     Task<Stream?> OpenAsync(string publicToken, CancellationToken cancellationToken = default);
     Task DeleteAsync(FaceAsset asset, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// 存储的人脸图片记录。保留为存储基础设施的元数据载体，不再绑定具体人员。
+/// 新开发时若需关联业务实体，在外部表中引用 <see cref="PublicToken"/> 即可。
+/// </summary>
+public class FaceAsset
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string StoragePath { get; set; } = string.Empty;
+    public string PublicToken { get; set; } = string.Empty;
+    public string ContentType { get; set; } = "image/jpeg";
+    public long ByteLength { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
 public sealed class FaceStorageService(IWebHostEnvironment environment, AccessItDbContext db) : IFaceStorageService
@@ -20,7 +43,7 @@ public sealed class FaceStorageService(IWebHostEnvironment environment, AccessIt
     private const int MaxPixels = 2_000_000;
     private readonly string _directory = Path.Combine(environment.WebRootPath ?? Path.Combine(environment.ContentRootPath, "wwwroot"), "faces");
 
-    public async Task<FaceAsset> StoreAsync(AccessPerson person, Stream source, CancellationToken cancellationToken = default)
+    public async Task<FaceAsset> StoreAsync(Stream source, CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(_directory);
         using var image = await Image.LoadAsync(source, cancellationToken);
@@ -52,7 +75,6 @@ public sealed class FaceStorageService(IWebHostEnvironment environment, AccessIt
 
         var asset = new FaceAsset
         {
-            AccessPersonId = person.Id,
             StoragePath = path,
             PublicToken = publicToken,
             ByteLength = info.Length,

@@ -1,5 +1,8 @@
+using AccessIt.Api.Services;
+
 namespace AccessIt.Api.Domain;
 
+/// <summary>系统角色。新开发时按需扩展。</summary>
 public enum ApplicationRole
 {
     None,
@@ -8,40 +11,49 @@ public enum ApplicationRole
     Auditor
 }
 
-public enum IssuanceJobStatus
+public enum AccessPersonKind { Employee, Visitor }
+public enum PersonSourceType { Hikiot, DingTalk }
+
+/// <summary>系统内的统一人员档案。访客不进入海康团队，仅保留设备直连编号。</summary>
+public class AccessPerson
 {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Cancelled
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = string.Empty;
+    public string NormalizedName { get; set; } = string.Empty;
+    public string? Mobile { get; set; }
+    public AccessPersonKind Kind { get; set; } = AccessPersonKind.Employee;
+    public string? HikiotPersonNo { get; set; }
+    public string DeviceEmployeeNo { get; set; } = string.Empty;
+    public string? CardNo { get; set; }
+    public Guid? FaceAssetId { get; set; }
+    public FaceAsset? FaceAsset { get; set; }
+    public bool PermanentValid { get; set; }
+    public DateTime? EnableBeginTimeUtc { get; set; }
+    public DateTime? EnableEndTimeUtc { get; set; }
+    public string? QrShareToken { get; set; }
+    public string? QrContent { get; set; }
+    public DateTime? QrRevokedAtUtc { get; set; }
+    public string? LastIssueResultJson { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+    public List<PersonSource> Sources { get; set; } = [];
 }
 
-public enum IssuanceStepType
+/// <summary>保存来源身份而不是把钉钉/海康字段硬编码为单值，允许同名合并。</summary>
+public class PersonSource
 {
-    EnsureAllDayTemplate,
-    UpsertUser,
-    UpsertCard,
-    UpsertFace,
-    DeleteFace,
-    DeleteCard,
-    DeleteUser
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccessPersonId { get; set; }
+    public AccessPerson AccessPerson { get; set; } = null!;
+    public PersonSourceType SourceType { get; set; }
+    public string ExternalId { get; set; } = string.Empty;
+    public string? UnionId { get; set; }
+    public DateTime SyncedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
-public enum SyncRunStatus
-{
-    Running,
-    Completed,
-    Failed
-}
-
-public enum SyncConflictResolution
-{
-    Pending,
-    KeepLocal,
-    KeepDevice
-}
-
+/// <summary>
+/// 登录用户（钉钉身份）。保留：登录认证与用户管理依赖此模型。
+/// </summary>
 public class ApplicationUser
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -57,6 +69,10 @@ public class ApplicationUser
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// HIKIoT 连接（单行 Id=1）。保留：AT/UT token 缓存机制的持久化载体。
+/// 加密存储 App/User Access Token 与对应 Refresh Token 及过期时间。
+/// </summary>
 public class HikiotConnection
 {
     public int Id { get; set; } = 1;
@@ -76,6 +92,7 @@ public class HikiotConnection
     public bool NeedsReauthorization { get; set; } = true;
 }
 
+/// <summary>HIKIoT 第三方授权 state（一次性，10 分钟有效）。保留：OAuth 授权闭环。</summary>
 public class HikiotAuthorizationState
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -84,104 +101,7 @@ public class HikiotAuthorizationState
     public DateTime ExpiresAtUtc { get; set; }
 }
 
-public class FaceAsset
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccessPersonId { get; set; }
-    public AccessPerson AccessPerson { get; set; } = null!;
-    public string StoragePath { get; set; } = string.Empty;
-    public string PublicToken { get; set; } = string.Empty;
-    public string ContentType { get; set; } = "image/jpeg";
-    public long ByteLength { get; set; }
-    public int Width { get; set; }
-    public int Height { get; set; }
-    // HIKIoT never returns a downloadable face image. This only records the remote team's identification id.
-    public long? HikiotIdentificationId { get; set; }
-    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-}
-
-public class DevicePassword
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccessPersonId { get; set; }
-    public AccessPerson AccessPerson { get; set; } = null!;
-    public string ProtectedValue { get; set; } = string.Empty;
-    public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
-}
-
-public class IssuanceJob
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid? AccessPersonId { get; set; }
-    public Guid? AccessDeviceId { get; set; }
-    public Guid? ParentJobId { get; set; }
-    public Guid? RelatedEntityId { get; set; }
-    // Retains the old card number for a queued card replacement after the AccessCard record has been edited.
-    public string? CardNoOverride { get; set; }
-    public int Sequence { get; set; }
-    public IssuanceStepType Type { get; set; }
-    public IssuanceJobStatus Status { get; set; } = IssuanceJobStatus.Pending;
-    public int AttemptCount { get; set; }
-    public DateTime NextAttemptAtUtc { get; set; } = DateTime.UtcNow;
-    public string? TraceId { get; set; }
-    public string? FailureCode { get; set; }
-    public string? FailureMessage { get; set; }
-    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-    public DateTime? CompletedAtUtc { get; set; }
-}
-
-public class HikiotIssueBatch
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public string BatchNo { get; set; } = string.Empty;
-    public Guid AccessPersonId { get; set; }
-    public string? DeviceSerial { get; set; }
-    public string Status { get; set; } = "Submitted";
-    public string? FailureReason { get; set; }
-    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-    public DateTime? CheckedAtUtc { get; set; }
-}
-
-public class SyncRun
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccessDeviceId { get; set; }
-    public string StartedByUserId { get; set; } = string.Empty;
-    public SyncRunStatus Status { get; set; } = SyncRunStatus.Running;
-    public int RemoteCount { get; set; }
-    public int NewCount { get; set; }
-    public int ConflictCount { get; set; }
-    public string? FailureMessage { get; set; }
-    public DateTime StartedAtUtc { get; set; } = DateTime.UtcNow;
-    public DateTime? CompletedAtUtc { get; set; }
-}
-
-public class SyncConflict
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid SyncRunId { get; set; }
-    public Guid? AccessPersonId { get; set; }
-    public string EmployeeNo { get; set; } = string.Empty;
-    public string FieldName { get; set; } = string.Empty;
-    public string? LocalValue { get; set; }
-    public string? RemoteValue { get; set; }
-    public SyncConflictResolution Resolution { get; set; } = SyncConflictResolution.Pending;
-    public string? ResolvedByUserId { get; set; }
-    public DateTime? ResolvedAtUtc { get; set; }
-}
-
-public class VisitorQrShare
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccessPersonId { get; set; }
-    public string OpaqueToken { get; set; } = string.Empty;
-    public string QrCodeContent { get; set; } = string.Empty;
-    public DateTime ExpiresAtUtc { get; set; }
-    public DateTime? RevokedAtUtc { get; set; }
-    public string? IssuedToHostUserId { get; set; }
-    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
-}
-
+/// <summary>审计事件。保留：通用基础设施。</summary>
 public class AuditEvent
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -191,10 +111,4 @@ public class AuditEvent
     public string EntityId { get; set; } = string.Empty;
     public string? DetailsJson { get; set; }
     public DateTime OccurredAtUtc { get; set; } = DateTime.UtcNow;
-}
-
-public class PersonNumberSequence
-{
-    public PersonKind Kind { get; set; }
-    public long LastValue { get; set; }
 }

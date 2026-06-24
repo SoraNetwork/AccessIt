@@ -1,291 +1,167 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using AccessIt.Api.Configuration;
 using AccessIt.Api.Data;
+using AccessIt.Api.DingTalk;
 using AccessIt.Api.Domain;
 using AccessIt.Api.Hikiot;
-using AccessIt.Api.Security;
 
 namespace AccessIt.Api.Services;
 
-public sealed record CreateEmployeeInput(string Name, string? DingTalkUserId, string? Mobile, IReadOnlyList<Guid> DeviceIds);
-public sealed record CreateVisitorInput(string Name, DateTime BeginTime, DateTime EndTime, int MaxOpenDoorTime, string? Mobile, IReadOnlyList<Guid> DeviceIds);
-public sealed record UpdateVisitorInput(DateTime BeginTime, DateTime EndTime, int MaxOpenDoorTime, string? Mobile, IReadOnlyList<Guid> DeviceIds);
-public sealed record UpdateEmployeeInput(string Name, string? DingTalkUserId, string? Mobile);
+public sealed record SyncResult(int Created, int Updated);
+public sealed record PersonIssueResult(string DeviceSerial, bool Succeeded, string Message);
 
 public interface IPersonService
 {
-    Task<AccessPerson> CreateEmployeeAsync(CreateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default);
-    Task<AccessPerson> CreateVisitorAsync(CreateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default);
-    Task<AccessPerson> UpdateVisitorAsync(Guid personId, UpdateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default);
-    Task<AccessPerson> UpdateEmployeeAsync(Guid personId, UpdateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default);
-    Task<AccessCard> AddCardAsync(Guid personId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default);
-    Task<AccessCard> UpdateCardAsync(Guid personId, Guid cardId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default);
-    Task SetPasswordAsync(Guid personId, string password, string actorUserId, CancellationToken cancellationToken = default);
-    Task<FaceAsset> AddFaceAsync(Guid personId, Stream image, string actorUserId, CancellationToken cancellationToken = default);
-    Task DeleteAsync(Guid personId, string actorUserId, CancellationToken cancellationToken = default);
+    Task<SyncResult> SyncHikiotAsync(CancellationToken cancellationToken = default);
+    Task<SyncResult> SyncDingTalkAsync(IReadOnlyList<DingTalkDirectoryEntry> entries, CancellationToken cancellationToken = default);
+    Task<AccessPerson> CreateVisitorAsync(string name, DateTime beginUtc, DateTime endUtc, string? cardNo, string? password, Guid? faceAssetId, bool generateQr, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PersonIssueResult>> UpdateCredentialsAsync(Guid id, string? cardNo, string? password, Guid? faceAssetId, CancellationToken cancellationToken = default);
+    Task PublishToHikiotAsync(Guid id, CancellationToken cancellationToken = default);
 }
 
-public sealed class PersonService(
-    AccessItDbContext db,
-    IIssuanceJobService jobs,
-    IHikiotTeamPeopleService teamPeople,
-    IStandardAuthorityIssuanceService authorityIssuance,
-    IHikiotGateway hikiot,
-    ISecretProtector secretProtector,
-    IFaceStorageService faceStorage,
-    IAuditService audit) : IPersonService
+public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, IOptions<HikiotOptions> hikiotOptions) : IPersonService
 {
-    public async Task<AccessPerson> CreateEmployeeAsync(CreateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default)
+    public async Task<SyncResult> SyncHikiotAsync(CancellationToken cancellationToken = default)
     {
-        var sequence = await NextSequenceAsync(PersonKind.Employee, cancellationToken);
-        var person = AccessPerson.CreateEmployee(sequence, input.Name, input.DingTalkUserId);
-        person.Mobile = input.Mobile;
+        var created = 0; var updated = 0;
+        foreach (var remote in await hikiot.GetTeamPeopleAsync(cancellationToken))
+        {
+            var (person, wasCreated) = await FindOrCreateAsync(remote.Name, remote.Mobile, AccessPersonKind.Employee, PersonSourceType.Hikiot, remote.PersonNo, null, cancellationToken);
+            person.HikiotPersonNo = remote.PersonNo;
+            person.UpdatedAtUtc = DateTime.UtcNow;
+            if (wasCreated) created++; else updated++;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        return new SyncResult(created, updated);
+    }
+
+    public async Task<SyncResult> SyncDingTalkAsync(IReadOnlyList<DingTalkDirectoryEntry> entries, CancellationToken cancellationToken = default)
+    {
+        var created = 0; var updated = 0;
+        foreach (var entry in entries.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.UserId)))
+        {
+            var (person, wasCreated) = await FindOrCreateAsync(entry.Name, entry.Mobile, AccessPersonKind.Employee, PersonSourceType.DingTalk, entry.UserId, entry.UnionId, cancellationToken);
+            person.UpdatedAtUtc = DateTime.UtcNow;
+            if (wasCreated) created++; else updated++;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        return new SyncResult(created, updated);
+    }
+
+    public async Task<AccessPerson> CreateVisitorAsync(string name, DateTime beginUtc, DateTime endUtc, string? cardNo, string? password, Guid? faceAssetId, bool generateQr, CancellationToken cancellationToken = default)
+    {
+        if (endUtc <= beginUtc) throw new InvalidOperationException("访客结束时间必须晚于开始时间。");
+        var person = new AccessPerson
+        {
+            Name = name.Trim(), NormalizedName = Normalize(name), Kind = AccessPersonKind.Visitor,
+            DeviceEmployeeNo = "V" + Guid.NewGuid().ToString("N")[..20].ToUpperInvariant(),
+            EnableBeginTimeUtc = beginUtc, EnableEndTimeUtc = endUtc, CardNo = string.IsNullOrWhiteSpace(cardNo) ? null : cardNo.Trim(), FaceAssetId = faceAssetId,
+            QrShareToken = generateQr ? NewToken() : null
+        };
         db.AccessPeople.Add(person);
         await db.SaveChangesAsync(cancellationToken);
-        // Employee changes are published immediately: team member/credentials first, then the
-        // standard authority-config and issued-job path. The input device list is intentionally
-        // ignored because employee policy is all managed access devices.
-        await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.employee.created", "AccessPerson", person.Id, new { person.EmployeeNo, automaticallyPublished = true }, cancellationToken);
-        return person;
-    }
-
-    public async Task<AccessPerson> CreateVisitorAsync(CreateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        var sequence = await NextSequenceAsync(PersonKind.Visitor, cancellationToken);
-        var person = AccessPerson.CreateVisitor(sequence, input.Name, input.BeginTime, input.EndTime, input.MaxOpenDoorTime);
-        person.Mobile = input.Mobile;
-        db.AccessPeople.Add(person);
-        var devices = await AssignDevicesAsync(person, input.DeviceIds, cancellationToken);
+        var results = await IssueDirectAsync(person, password, generateQr, cancellationToken);
+        person.LastIssueResultJson = JsonSerializer.Serialize(results);
         await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.visitor.created", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
         return person;
     }
 
-    public async Task<AccessPerson> UpdateVisitorAsync(Guid personId, UpdateVisitorInput input, string actorUserId, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<PersonIssueResult>> UpdateCredentialsAsync(Guid id, string? cardNo, string? password, Guid? faceAssetId, CancellationToken cancellationToken = default)
     {
-        var person = await db.AccessPeople.Include(x => x.DeviceGrants).Include(x => x.Cards).Include(x => x.FaceAssets).SingleOrDefaultAsync(x => x.Id == personId, cancellationToken)
-                     ?? throw new KeyNotFoundException("Person was not found.");
-        person.UpdateVisitorWindow(input.BeginTime, input.EndTime, input.MaxOpenDoorTime);
-        person.Mobile = input.Mobile;
-        var devices = await ReplaceDeviceAssignmentsAsync(person, input.DeviceIds, cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
-        await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.visitor.updated", "AccessPerson", person.Id, null, cancellationToken);
-        return person;
-    }
-
-    public async Task<AccessPerson> UpdateEmployeeAsync(Guid personId, UpdateEmployeeInput input, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        if (person.Kind != PersonKind.Employee) throw new InvalidOperationException("Only employee details can be updated here.");
-        ArgumentException.ThrowIfNullOrWhiteSpace(input.Name);
-        if (System.Text.Encoding.UTF8.GetByteCount(input.Name.Trim()) > 32)
-            throw new ArgumentOutOfRangeException(nameof(input.Name), "Name must not exceed 32 UTF-8 bytes.");
-        person.Name = input.Name.Trim();
-        person.DingTalkUserId = string.IsNullOrWhiteSpace(input.DingTalkUserId) ? null : input.DingTalkUserId.Trim();
-        person.Mobile = string.IsNullOrWhiteSpace(input.Mobile) ? null : input.Mobile.Trim();
+        var person = await db.AccessPeople.Include(x => x.FaceAsset).SingleOrDefaultAsync(x => x.Id == id, cancellationToken) ?? throw new KeyNotFoundException("人员不存在。");
+        if (cardNo is not null) person.CardNo = string.IsNullOrWhiteSpace(cardNo) ? null : cardNo.Trim();
+        if (faceAssetId.HasValue) person.FaceAssetId = faceAssetId;
         person.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.employee.updated", "AccessPerson", person.Id, new { person.EmployeeNo }, cancellationToken);
-        return person;
-    }
-
-    public async Task<AccessCard> AddCardAsync(Guid personId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(cardNo);
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        if (await db.AccessCards.AnyAsync(x => x.CardNo == cardNo, cancellationToken)) throw new InvalidOperationException("该卡号已被使用。");
-        var card = new AccessCard { AccessPersonId = personId, CardNo = cardNo.Trim(), IsVirtual = isVirtual };
-        db.AccessCards.Add(card);
-        person.Cards.Add(card);
-        await db.SaveChangesAsync(cancellationToken);
-        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.card.added", "AccessCard", card.Id, new { person.EmployeeNo, card.CardNo }, cancellationToken);
-        return card;
-    }
-
-    public async Task<AccessCard> UpdateCardAsync(Guid personId, Guid cardId, string cardNo, bool isVirtual, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(cardNo);
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        var card = person.Cards.SingleOrDefault(x => x.Id == cardId) ?? throw new KeyNotFoundException("Card was not found for this person.");
-        var newCardNo = cardNo.Trim();
-        if (await db.AccessCards.AnyAsync(x => x.CardNo == newCardNo && x.Id != cardId, cancellationToken))
-            throw new InvalidOperationException("The card number is already assigned to another person.");
-        var oldCardNo = card.CardNo;
-        var numberChanged = !string.Equals(oldCardNo, newCardNo, StringComparison.Ordinal);
-        card.CardNo = newCardNo;
-        card.IsVirtual = isVirtual;
-        // Keep the managed team-identification id for employee replacements so PublishAsync can
-        // delete the old remote card before adding the new number. Visitors use device-direct cards.
-        if (numberChanged && person.Kind != PersonKind.Employee) card.HikiotIdentificationId = null;
-        person.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        if (person.Kind == PersonKind.Employee)
-            await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
+        var results = new List<PersonIssueResult>();
+        if (person.Kind == AccessPersonKind.Visitor)
+            results.AddRange(await IssueDirectAsync(person, password, false, cancellationToken));
         else
         {
-            var devices = await ActiveDevicesAsync(personId, cancellationToken);
-            if (numberChanged && devices.Count > 0)
-                await jobs.QueueCardReplacementAsync(person, card, oldCardNo, devices, actorUserId, cancellationToken);
-            else if (devices.Count > 0)
-                await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-        }
-        await audit.WriteAsync(actorUserId, "person.card.updated", "AccessCard", card.Id, new { person.EmployeeNo, oldCardNo, card.CardNo, card.IsVirtual }, cancellationToken);
-        return card;
-    }
-
-    public async Task SetPasswordAsync(Guid personId, string password, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        if (password.Length is < 4 or > 8) throw new ArgumentOutOfRangeException(nameof(password), "密码长度必须为 4 到 8 位。");
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        var record = await db.DevicePasswords.SingleOrDefaultAsync(x => x.AccessPersonId == personId, cancellationToken);
-        if (record is null)
-        {
-            record = new DevicePassword { AccessPersonId = personId };
-            db.DevicePasswords.Add(record);
-        }
-        record.ProtectedValue = secretProtector.Protect(password);
-        record.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
-        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
-        if (person.Kind == PersonKind.Employee)
-            await DistributeEmployeePasswordAsync(person, password, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.password.updated", "AccessPerson", personId, null, cancellationToken);
-    }
-
-    public async Task<FaceAsset> AddFaceAsync(Guid personId, Stream image, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        foreach (var existing in person.FaceAssets.ToList()) await faceStorage.DeleteAsync(existing, cancellationToken);
-        var face = await faceStorage.StoreAsync(person, image, cancellationToken);
-        person.FaceAssets.Add(face);
-        await db.SaveChangesAsync(cancellationToken);
-        await QueueCurrentGrantsAsync(person, actorUserId, cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.face.updated", "FaceAsset", face.Id, new { person.EmployeeNo }, cancellationToken);
-        return face;
-    }
-
-    public async Task DeleteAsync(Guid personId, string actorUserId, CancellationToken cancellationToken = default)
-    {
-        var person = await LoadPersonAsync(personId, cancellationToken);
-        person.Status = PersonStatus.Deleted;
-        if (person.Kind == PersonKind.Visitor)
-        {
-            var now = DateTime.UtcNow;
-            var shares = await db.VisitorQrShares.Where(x => x.AccessPersonId == personId && x.RevokedAtUtc == null).ToListAsync(cancellationToken);
-            foreach (var share in shares) share.RevokedAtUtc = now;
-        }
-        await db.SaveChangesAsync(cancellationToken);
-        if (person.Kind == PersonKind.Employee)
-        {
-            await authorityIssuance.RevokeEmployeeAsync(person, actorUserId, cancellationToken);
-            // Then delete device-level credentials
-            var devices = await db.AccessDevices.Where(x => x.IsManaged && x.SupportsUserInfo).ToListAsync(cancellationToken);
-            foreach (var device in devices)
+            if (string.IsNullOrWhiteSpace(person.HikiotPersonNo)) throw new InvalidOperationException("该人员尚未在海康团队中创建，不能修改团队认证信息。");
+            if (cardNo is not null && !string.IsNullOrWhiteSpace(person.CardNo)) await hikiot.AddTeamCardAsync(person.HikiotPersonNo, person.CardNo, cancellationToken);
+            if (faceAssetId.HasValue)
             {
-                foreach (var face in person.FaceAssets) await hikiot.DeleteFaceAsync(device.DeviceSerial, person.EmployeeNo, cancellationToken);
-                foreach (var card in person.Cards.Where(x => !x.IsVirtual)) await hikiot.DeleteCardAsync(device.DeviceSerial, card.CardNo, cancellationToken);
-                await hikiot.DeleteUserAsync(device.DeviceSerial, person.EmployeeNo, cancellationToken);
+                var face = await db.FaceAssets.FindAsync([faceAssetId.Value], cancellationToken) ?? throw new InvalidOperationException("人脸图片不存在。");
+                await hikiot.AddTeamFaceAsync(person.HikiotPersonNo, BuildFaceUrl(face.PublicToken), cancellationToken);
             }
+            if (!string.IsNullOrWhiteSpace(password)) results.AddRange(await IssueDirectAsync(person, password, false, cancellationToken));
         }
-        else
+        person.LastIssueResultJson = JsonSerializer.Serialize(results);
+        await db.SaveChangesAsync(cancellationToken);
+        return results;
+    }
+
+    public async Task PublishToHikiotAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var person = await db.AccessPeople.Include(x => x.Sources).SingleOrDefaultAsync(x => x.Id == id, cancellationToken) ?? throw new KeyNotFoundException("人员不存在。");
+        if (person.Kind != AccessPersonKind.Employee) throw new InvalidOperationException("访客不能创建为海康团队人员。");
+        if (!string.IsNullOrWhiteSpace(person.HikiotPersonNo)) return;
+        person.HikiotPersonNo = await hikiot.CreateTeamPersonAsync(person.Name, person.Mobile, cancellationToken);
+        person.Sources.Add(new PersonSource { SourceType = PersonSourceType.Hikiot, ExternalId = person.HikiotPersonNo });
+        person.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<List<PersonIssueResult>> IssueDirectAsync(AccessPerson person, string? password, bool generateQr, CancellationToken cancellationToken)
+    {
+        var devices = await hikiot.GetDoorDevicesAsync(cancellationToken);
+        if (devices.Count == 0) throw new InvalidOperationException("未发现支持人员信息的门禁设备。");
+        var begin = person.EnableBeginTimeUtc ?? DateTime.UtcNow;
+        var end = person.EnableEndTimeUtc ?? DateTime.UtcNow.AddYears(1);
+        var results = new List<PersonIssueResult>();
+        foreach (var device in devices)
         {
-            await jobs.QueueDeleteAsync(person, await ActiveDevicesAsync(personId, cancellationToken), actorUserId, cancellationToken);
-        }
-        await audit.WriteAsync(actorUserId, "person.delete.requested", "AccessPerson", personId, new { person.EmployeeNo }, cancellationToken);
-    }
-
-    private async Task<AccessPerson> LoadPersonAsync(Guid personId, CancellationToken cancellationToken)
-        => await db.AccessPeople.Include(x => x.DeviceGrants).Include(x => x.Cards).Include(x => x.FaceAssets).SingleOrDefaultAsync(x => x.Id == personId, cancellationToken)
-           ?? throw new KeyNotFoundException("Person was not found.");
-
-    private async Task<List<AccessDevice>> AssignDevicesAsync(AccessPerson person, IReadOnlyList<Guid> deviceIds, CancellationToken cancellationToken)
-    {
-        var devices = await db.AccessDevices.Where(x => deviceIds.Contains(x.Id) && x.IsManaged).ToListAsync(cancellationToken);
-        if (devices.Count != deviceIds.Distinct().Count()) throw new InvalidOperationException("至少一个设备不存在或未纳管。");
-        foreach (var device in devices) person.DeviceGrants.Add(new DeviceGrant { AccessDeviceId = device.Id });
-        return devices;
-    }
-
-    private async Task<List<AccessDevice>> ReplaceDeviceAssignmentsAsync(AccessPerson person, IReadOnlyList<Guid> deviceIds, CancellationToken cancellationToken)
-    {
-        var devices = await db.AccessDevices.Where(x => deviceIds.Contains(x.Id) && x.IsManaged).ToListAsync(cancellationToken);
-        if (devices.Count != deviceIds.Distinct().Count()) throw new InvalidOperationException("至少一个设备不存在或未纳管。");
-        db.DeviceGrants.RemoveRange(person.DeviceGrants);
-        person.DeviceGrants.Clear();
-        foreach (var device in devices) person.DeviceGrants.Add(new DeviceGrant { AccessDeviceId = device.Id });
-        return devices;
-    }
-
-    private Task<List<AccessDevice>> ActiveDevicesAsync(Guid personId, CancellationToken cancellationToken)
-        => db.DeviceGrants.Where(x => x.AccessPersonId == personId && x.IsActive).Select(x => x.AccessDevice).ToListAsync(cancellationToken);
-
-    private async Task QueueCurrentGrantsAsync(AccessPerson person, string actorUserId, CancellationToken cancellationToken)
-    {
-        if (person.Kind == PersonKind.Employee)
-        {
-            await teamPeople.PublishAsync(person.Id, actorUserId, cancellationToken);
-            return;
-        }
-        var devices = await ActiveDevicesAsync(person.Id, cancellationToken);
-        if (devices.Count > 0) await jobs.QueueUpsertAsync(person, devices, actorUserId, cancellationToken);
-    }
-
-    private async Task DistributeEmployeePasswordAsync(AccessPerson person, string password, string actorUserId, CancellationToken cancellationToken)
-    {
-        var devices = await ActiveDevicesAsync(person.Id, cancellationToken);
-        var targetDevices = devices.Where(x => x.IsManaged && x.SupportsUserInfo && x.SupportsPurePassword).DistinctBy(x => x.Id).ToList();
-        var traces = new List<object>();
-        var failures = new List<string>();
-        foreach (var device in targetDevices)
-        {
-            if (device.SupportsUserRightPlanTemplate && (device.AllDayTemplateId == null || !device.HasAllDayTemplate))
+            var user = await hikiot.UpsertDirectUserAsync(device, new HikiotDirectUser(person.DeviceEmployeeNo, person.Name, person.Kind == AccessPersonKind.Visitor, person.PermanentValid, begin, end, password), cancellationToken);
+            results.Add(new PersonIssueResult(device.Serial, user.Succeeded, user.Message));
+            if (!user.Succeeded) continue;
+            if (!string.IsNullOrWhiteSpace(person.CardNo) && device.SupportsCard)
             {
-                var template = await hikiot.EnsureAllDayTemplateAsync(device.DeviceSerial, cancellationToken);
-                if (!template.Succeeded)
+                var card = await hikiot.UpsertDirectCardAsync(device, person.DeviceEmployeeNo, person.CardNo, cancellationToken);
+                results.Add(new PersonIssueResult(device.Serial, card.Succeeded, "卡片：" + card.Message));
+            }
+            if (person.FaceAssetId.HasValue && device.SupportsFace)
+            {
+                var face = await db.FaceAssets.FindAsync([person.FaceAssetId.Value], cancellationToken);
+                if (face is not null)
                 {
-                    failures.Add($"{device.DeviceSerial}: unable to initialize access template ({template.Code} {template.Message})");
-                    continue;
+                    var item = await hikiot.UpsertDirectFaceAsync(device, person.DeviceEmployeeNo, BuildFaceUrl(face.PublicToken), cancellationToken);
+                    results.Add(new PersonIssueResult(device.Serial, item.Succeeded, "人脸：" + item.Message));
                 }
-                device.HasAllDayTemplate = true;
-                device.AllDayTemplateId = 8;
             }
-
-            // The documented password channel is the device-direct user upsert. It is deliberately
-            // limited to pure-password-capable devices and does not write a password to the team.
-            var result = await hikiot.UpsertUserAsync(device.DeviceSerial, person, password, device.SupportsUserRightPlanTemplate ? device.AllDayTemplateId : null, cancellationToken);
-            if (!result.Succeeded)
+            if (generateQr && device.SupportsCard)
             {
-                failures.Add($"{device.DeviceSerial}: {result.Code} {result.Message}{(string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : $": {result.Detail}")}");
-                continue;
+                var virtualCard = person.CardNo ?? ("Q" + person.Id.ToString("N")[..10].ToUpperInvariant());
+                if (string.IsNullOrWhiteSpace(person.CardNo))
+                {
+                    var card = await hikiot.UpsertDirectCardAsync(device, person.DeviceEmployeeNo, virtualCard, cancellationToken);
+                    results.Add(new PersonIssueResult(device.Serial, card.Succeeded, "二维码虚拟卡：" + card.Message));
+                    if (!card.Succeeded) continue;
+                }
+                var qr = await hikiot.GenerateVisitorQrAsync(device, person.DeviceEmployeeNo, virtualCard, cancellationToken);
+                person.QrContent ??= qr;
             }
-            traces.Add(new { device.DeviceSerial, result.TraceId });
         }
-        await db.SaveChangesAsync(cancellationToken);
-        await audit.WriteAsync(actorUserId, "person.password.device-issued", "AccessPerson", person.Id, new
-        {
-            person.EmployeeNo,
-            targetedDeviceCount = targetDevices.Count,
-            unsupportedDeviceCount = devices.Count - targetDevices.Count,
-            traces,
-            failures
-        }, cancellationToken);
-        if (failures.Count > 0)
-            throw new InvalidOperationException($"Password was saved but could not be issued to every compatible device: {string.Join("; ", failures)}");
+        return results;
     }
 
-    private async Task<long> NextSequenceAsync(PersonKind kind, CancellationToken cancellationToken)
+    private async Task<(AccessPerson Person, bool Created)> FindOrCreateAsync(string name, string? mobile, AccessPersonKind kind, PersonSourceType sourceType, string externalId, string? unionId, CancellationToken cancellationToken)
     {
-        var sequence = await db.PersonNumberSequences.FindAsync([kind], cancellationToken);
-        if (sequence is null)
+        var source = await db.PersonSources.Include(x => x.AccessPerson).SingleOrDefaultAsync(x => x.SourceType == sourceType && x.ExternalId == externalId, cancellationToken);
+        var person = source?.AccessPerson ?? await db.AccessPeople.Include(x => x.Sources).FirstOrDefaultAsync(x => x.NormalizedName == Normalize(name), cancellationToken);
+        var created = person is null;
+        if (person is null)
         {
-            sequence = new PersonNumberSequence { Kind = kind, LastValue = 0 };
-            db.PersonNumberSequences.Add(sequence);
+            person = new AccessPerson { Name = name.Trim(), NormalizedName = Normalize(name), Mobile = mobile, Kind = kind, DeviceEmployeeNo = "E" + Guid.NewGuid().ToString("N")[..20].ToUpperInvariant() };
+            db.AccessPeople.Add(person);
         }
-        sequence.LastValue++;
-        return sequence.LastValue;
+        person.Mobile ??= mobile;
+        if (!person.Sources.Any(x => x.SourceType == sourceType && x.ExternalId == externalId)) person.Sources.Add(new PersonSource { SourceType = sourceType, ExternalId = externalId, UnionId = unionId });
+        return (person, created);
     }
+
+    private string BuildFaceUrl(string token) => hikiotOptions.Value.PublicBaseUrl.TrimEnd('/') + "/public/faces/" + token;
+    public static string Normalize(string value) => string.Concat(value.Where(c => !char.IsWhiteSpace(c))).ToUpperInvariant();
+    private static string NewToken() => Convert.ToHexString(Guid.NewGuid().ToByteArray()) + Convert.ToHexString(Guid.NewGuid().ToByteArray());
 }

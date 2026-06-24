@@ -5,25 +5,18 @@ using AccessIt.Api.Hikiot;
 
 namespace AccessIt.Api.Controllers;
 
+/// <summary>
+/// HIKIoT 连接与授权管理。重构后只保留 AT/UT 授权闭环所需端点；
+/// 部门、设备、权限等业务端点随业务逻辑清除，待重新开发。
+/// </summary>
 [ApiController]
 [Route("api/hikiot/connection")]
 public sealed class HikiotConnectionController(IHikiotGateway hikiot) : ControllerBase
 {
     [Authorize(Roles = nameof(ApplicationRole.SuperAdmin))]
     [HttpGet]
-    public Task<HikiotConnectionStatus> Status(CancellationToken cancellationToken) => hikiot.GetConnectionStatusAsync(cancellationToken);
-
-    [Authorize(Roles = nameof(ApplicationRole.SuperAdmin))]
-    [HttpGet("/api/hikiot/departments")]
-    public Task<IReadOnlyList<HikiotTeamDepartment>> Departments(CancellationToken cancellationToken) => hikiot.GetTeamDepartmentsAsync(cancellationToken);
-
-    [Authorize(Roles = nameof(ApplicationRole.SuperAdmin))]
-    [HttpPut("default-department")]
-    public async Task<ActionResult> SetDefaultDepartment([FromBody] SetDefaultDepartmentRequest request, CancellationToken cancellationToken)
-    {
-        await hikiot.SetDefaultDepartmentAsync(request.DepartmentNo, cancellationToken);
-        return NoContent();
-    }
+    public Task<HikiotConnectionStatus> Status(CancellationToken cancellationToken)
+        => hikiot.GetConnectionStatusAsync(cancellationToken);
 
     [Authorize(Roles = nameof(ApplicationRole.SuperAdmin))]
     [HttpPost("authorize")]
@@ -38,5 +31,3 @@ public sealed class HikiotConnectionController(IHikiotGateway hikiot) : Controll
         return Content("HIKIoT 授权成功，您可以关闭此页面。", "text/html; charset=utf-8");
     }
 }
-
-public sealed record SetDefaultDepartmentRequest(string DepartmentNo);
