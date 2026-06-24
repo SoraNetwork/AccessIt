@@ -229,9 +229,10 @@ public class HikiotGateway(
         var connection = await GetConnectionAsync(cancellationToken);
         if (string.IsNullOrWhiteSpace(connection.TeamNo)) throw new InvalidOperationException("HIKIoT team is unavailable; authorize the connection first.");
         var result = new Dictionary<string, HikiotTeamPerson>(StringComparer.OrdinalIgnoreCase);
+        const int teamPageSize = 50;
         for (var page = 1; page <= 100; page++)
         {
-            var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(connection.TeamNo)}&page={page}&size=100", cancellationToken);
+            var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(connection.TeamNo)}&page={page}&size={teamPageSize}", cancellationToken);
             EnsureApiSuccess(response, "读取海康团队人员失败");
             var entries = GetArray(response.Data, "list", "records", "items", "data");
             foreach (var item in entries)
@@ -241,7 +242,7 @@ public class HikiotGateway(
                 if (!string.IsNullOrWhiteSpace(personNo) && !string.IsNullOrWhiteSpace(name))
                     result[personNo] = new HikiotTeamPerson(personNo, name, GetString(item, "phone", "mobile"));
             }
-            if (entries.Count < 100) break;
+            if (entries.Count < teamPageSize) break;
         }
         return result.Values.OrderBy(x => x.Name).ToList();
     }
