@@ -302,12 +302,12 @@ public class HikiotGateway(
         {
             var groups = await GetSecureAsync<JsonElement>($"/issue/v1/deviceGroup/page?page={page}&size=100&containsDefault=true", cancellationToken);
             EnsureApiSuccess(groups, "读取门禁设备失败");
-            var entries = GetArray(groups.Data, "list", "records", "items", "data");
+            var entries = GetArray(groups.Data, "list", "records", "items", "data", "deviceGroups", "deviceGroupVOs", "deviceGroupList");
             foreach (var item in entries)
             {
                 foreach (var device in ExpandDevices(item))
                 {
-                    var serial = GetString(device, "deviceSerial", "resourceSerial", "serial");
+                    var serial = GetString(device, "deviceSerial", "resourceSerial", "serial", "deviceSn", "devSerial", "resourceCode");
                     if (string.IsNullOrWhiteSpace(serial)) continue;
                     var capacity = await GetSecureAsync<JsonElement>($"/issue/v1/device/capacityList?deviceSerial={Uri.EscapeDataString(serial)}", cancellationToken);
                     if (capacity.Code != 0) continue;
@@ -318,7 +318,10 @@ public class HikiotGateway(
             }
             if (entries.Count < 100) break;
         }
-        return all.Values.Where(x => x.SupportsUserInfo).ToList();
+        // 某些设备能力集把开关以字符串返回；若仍无法识别能力，保留已发现设备并让直连接口返回逐设备结果，
+        // 不应因为能力集格式差异而让访客创建直接失败。
+        var supported = all.Values.Where(x => x.SupportsUserInfo).ToList();
+        return supported.Count > 0 ? supported : all.Values.ToList();
     }
 
     public async Task<DeviceIssueResult> UpsertDirectUserAsync(HikiotDoorDevice device, HikiotDirectUser user, CancellationToken cancellationToken = default)
@@ -349,17 +352,33 @@ public class HikiotGateway(
 
     private static DeviceIssueResult ToIssueResult(string serial, HikiotEnvelope<JsonElement> response) => new(serial, response.Code == 0, response.Code == 0 ? "已接受下发" : $"{response.Code}: {response.Message}");
     private static void EnsureApiSuccess(HikiotEnvelope<JsonElement> response, string action) { if (response.Code != 0) throw new InvalidOperationException($"{action}：{response.Code} {response.Message}"); }
-    private static bool HasCapability(string json, string name) => json.Contains($"\"{name}\":1", StringComparison.OrdinalIgnoreCase) || json.Contains($"\"{name}\":true", StringComparison.OrdinalIgnoreCase);
+    private static bool HasCapability(string json, string name)
+        => json.Contains($"\"{name}\":1", StringComparison.OrdinalIgnoreCase)
+           || json.Contains($"\"{name}\":true", StringComparison.OrdinalIgnoreCase)
+           || json.Contains($"\"{name}\":\"1\"", StringComparison.OrdinalIgnoreCase)
+           || json.Contains($"\"{name}\":\"true\"", StringComparison.OrdinalIgnoreCase);
     private static List<JsonElement> GetArray(JsonElement data, params string[] names)
     {
         if (data.ValueKind == JsonValueKind.Array) return data.EnumerateArray().ToList();
-        if (data.ValueKind == JsonValueKind.Object) foreach (var name in names) if (data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array) return value.EnumerateArray().ToList();
+        if (data.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in names) if (data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Array) return value.EnumerateArray().ToList();
+            foreach (var property in data.EnumerateObject()) if (property.Value.ValueKind == JsonValueKind.Array) return property.Value.EnumerateArray().ToList();
+        }
         return [];
     }
     private static IEnumerable<JsonElement> ExpandDevices(JsonElement item)
     {
         yield return item;
-        foreach (var name in new[] { "devices", "deviceList", "resources" }) if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var list) && list.ValueKind == JsonValueKind.Array) foreach (var child in list.EnumerateArray()) yield return child;
+        if (item.ValueKind != JsonValueKind.Object) yield break;
+        foreach (var property in item.EnumerateObject())
+        {
+            if (property.Value.ValueKind == JsonValueKind.Array)
+                foreach (var child in property.Value.EnumerateArray())
+                    foreach (var nested in ExpandDevices(child)) yield return nested;
+            else if (property.Value.ValueKind == JsonValueKind.Object)
+                foreach (var nested in ExpandDevices(property.Value)) yield return nested;
+        }
     }
     private static string? GetString(JsonElement element, params string[] names)
     {
