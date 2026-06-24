@@ -30,7 +30,9 @@ public class HikiotGateway(
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        // HIKIoT 的 token 响应会把 expiresIn 返回为字符串，例如 "7200"。
+        NumberHandling = JsonNumberHandling.AllowReadingFromString
     };
 
     private readonly HikiotOptions _options = options.Value;
