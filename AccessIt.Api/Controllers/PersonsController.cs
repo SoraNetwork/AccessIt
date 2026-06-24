@@ -16,7 +16,7 @@ public sealed class PersonsController(AccessItDbContext db, IPersonService peopl
     [HttpGet]
     public async Task<IReadOnlyList<PersonDto>> List([FromQuery] string? q, CancellationToken cancellationToken)
     {
-        var query = db.AccessPeople.Include(x => x.Sources).Include(x => x.FaceAsset).AsQueryable();
+        var query = db.AccessPeople.Include(x => x.Sources).Include(x => x.Cards).Include(x => x.FaceAsset).AsQueryable();
         if (!string.IsNullOrWhiteSpace(q)) query = query.Where(x => x.Name.Contains(q) || (x.Mobile ?? "").Contains(q));
         return (await query.OrderBy(x => x.Kind).ThenBy(x => x.Name).ToListAsync(cancellationToken)).Select(PersonDto.From).ToList();
     }
@@ -67,7 +67,11 @@ public sealed class PersonsController(AccessItDbContext db, IPersonService peopl
 
 public sealed record CredentialRequest(string? CardNo, string? Password, Guid? FaceAssetId);
 public sealed record FaceUploadResponse(Guid FaceAssetId, string PublicToken);
-public sealed record PersonDto(Guid Id, string Name, string? Mobile, AccessPersonKind Kind, string? HikiotPersonNo, IReadOnlyList<string> Sources, string? CardNo, Guid? FaceAssetId, DateTime? EnableBeginTimeUtc, DateTime? EnableEndTimeUtc, string? QrShareToken, string? LastIssueResultJson)
+public sealed record PersonDto(Guid Id, string Name, string? Mobile, AccessPersonKind Kind, string? HikiotPersonNo, string DeviceEmployeeNo, IReadOnlyList<string> Sources, string? CardNo, IReadOnlyList<string> CardNos, Guid? FaceAssetId, string? HikiotFaceUrl, DateTime? EnableBeginTimeUtc, DateTime? EnableEndTimeUtc, string? QrShareToken, string? LastIssueResultJson)
 {
-    public static PersonDto From(AccessPerson x) => new(x.Id, x.Name, x.Mobile, x.Kind, x.HikiotPersonNo, x.Sources.Select(s => s.SourceType.ToString()).Distinct().ToList(), x.CardNo, x.FaceAssetId, x.EnableBeginTimeUtc, x.EnableEndTimeUtc, x.QrShareToken, x.LastIssueResultJson);
+    public static PersonDto From(AccessPerson x)
+    {
+        var cards = x.Cards.Select(c => c.CardNo).DefaultIfEmpty(x.CardNo).Where(x => !string.IsNullOrWhiteSpace(x)).Cast<string>().ToList();
+        return new(x.Id, x.Name, x.Mobile, x.Kind, x.HikiotPersonNo, x.DeviceEmployeeNo, x.Sources.Select(s => s.SourceType.ToString()).Distinct().ToList(), cards.FirstOrDefault(), cards, x.FaceAssetId, x.HikiotFaceUrl, x.EnableBeginTimeUtc, x.EnableEndTimeUtc, x.QrShareToken, x.LastIssueResultJson);
+    }
 }

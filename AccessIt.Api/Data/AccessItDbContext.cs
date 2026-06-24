@@ -18,6 +18,7 @@ public class AccessItDbContext(DbContextOptions<AccessItDbContext> options) : Db
     public DbSet<AuditEvent> AuditEvents => Set<AuditEvent>();
     public DbSet<AccessPerson> AccessPeople => Set<AccessPerson>();
     public DbSet<PersonSource> PersonSources => Set<PersonSource>();
+    public DbSet<AccessCard> AccessCards => Set<AccessCard>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -51,12 +52,19 @@ public class AccessItDbContext(DbContextOptions<AccessItDbContext> options) : Db
         modelBuilder.Entity<AccessPerson>(entity =>
         {
             entity.HasIndex(x => x.NormalizedName);
+            entity.HasIndex(x => new { x.Kind, x.EnableEndTimeUtc, x.CreatedAtUtc });
             entity.HasIndex(x => x.HikiotPersonNo).IsUnique().HasFilter("\"HikiotPersonNo\" IS NOT NULL");
             entity.HasIndex(x => x.QrShareToken).IsUnique().HasFilter("\"QrShareToken\" IS NOT NULL");
             entity.Property(x => x.Name).HasMaxLength(100).IsRequired();
             entity.Property(x => x.NormalizedName).HasMaxLength(100).IsRequired();
             entity.Property(x => x.DeviceEmployeeNo).HasMaxLength(32).IsRequired();
             entity.HasOne(x => x.FaceAsset).WithMany().HasForeignKey(x => x.FaceAssetId).OnDelete(DeleteBehavior.SetNull);
+        });
+        modelBuilder.Entity<AccessCard>(entity =>
+        {
+            entity.HasIndex(x => x.CardNo).IsUnique();
+            entity.Property(x => x.CardNo).HasMaxLength(64).IsRequired();
+            entity.HasOne(x => x.AccessPerson).WithMany(x => x.Cards).HasForeignKey(x => x.AccessPersonId).OnDelete(DeleteBehavior.Cascade);
         });
         modelBuilder.Entity<PersonSource>(entity =>
         {

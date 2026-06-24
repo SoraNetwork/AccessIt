@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { beginGlobalLoading, endGlobalLoading } from './services/loading'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -11,6 +12,7 @@ const router = createRouter({
         { path: '', redirect: '/dashboard' },
         { path: 'dashboard', component: () => import('./pages/PeoplePage.vue') },
         { path: 'visitors', component: () => import('./pages/VisitorsPage.vue') },
+        { path: 'visitors/:id', component: () => import('./pages/VisitorDetailPage.vue') },
         { path: 'hikiot', component: () => import('./pages/HikiotPage.vue') },
       ]
     },
@@ -24,7 +26,10 @@ router.beforeEach((to) => {
   if (!to.meta.public && !user) return '/login'
   if (user?.role === 'None' && !to.meta.pending) return '/login'
   if (to.meta.superAdmin && user?.role !== 'SuperAdmin') return '/login'
+  beginGlobalLoading('页面加载中…')
   return true
 })
+router.afterEach(() => endGlobalLoading())
+router.onError(() => endGlobalLoading())
 
 export default router

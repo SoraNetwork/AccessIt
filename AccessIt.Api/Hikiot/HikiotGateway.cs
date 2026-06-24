@@ -267,6 +267,20 @@ public class HikiotGateway(
         return personNo;
     }
 
+    public async Task<IReadOnlyList<HikiotIdentification>> GetTeamIdentificationsAsync(string personNo, CancellationToken cancellationToken = default)
+    {
+        var response = await GetSecureAsync<JsonElement>($"/team/v1/person/listIdentifications?personNo={Uri.EscapeDataString(personNo)}", cancellationToken);
+        EnsureApiSuccess(response, "读取海康人员认证信息失败");
+        var result = new List<HikiotIdentification>();
+        foreach (var item in GetArray(response.Data, "identifications", "personIdentifications", "list", "items", "data"))
+        {
+            var typeText = GetString(item, "identificationType", "type");
+            var value = GetString(item, "identification", "identificationValue", "value", "faceUrl");
+            if (int.TryParse(typeText, out var type) && !string.IsNullOrWhiteSpace(value)) result.Add(new HikiotIdentification(type, value));
+        }
+        return result;
+    }
+
     public async Task AddTeamCardAsync(string personNo, string cardNo, CancellationToken cancellationToken = default)
     {
         var response = await PostSecureAsync<JsonElement>("/team/v1/person/addIdentification", new { personNo, identificationType = 1, identification = cardNo }, cancellationToken);

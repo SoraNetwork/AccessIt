@@ -25,6 +25,9 @@ public class AccessPerson
     public string? HikiotPersonNo { get; set; }
     public string DeviceEmployeeNo { get; set; } = string.Empty;
     public string? CardNo { get; set; }
+    public List<AccessCard> Cards { get; set; } = [];
+    /// <summary>从海康团队同步的人脸地址；仅表示远端已有人脸，不等同于本地上传的人脸资产。</summary>
+    public string? HikiotFaceUrl { get; set; }
     public Guid? FaceAssetId { get; set; }
     public FaceAsset? FaceAsset { get; set; }
     public bool PermanentValid { get; set; }
@@ -37,6 +40,17 @@ public class AccessPerson
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
     public List<PersonSource> Sources { get; set; } = [];
+}
+
+/// <summary>人员可拥有多张门禁卡；卡号在系统内唯一。</summary>
+public class AccessCard
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AccessPersonId { get; set; }
+    public AccessPerson AccessPerson { get; set; } = null!;
+    public string CardNo { get; set; } = string.Empty;
+    public bool IsVirtual { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>保存来源身份而不是把钉钉/海康字段硬编码为单值，允许同名合并。</summary>

@@ -3,6 +3,7 @@ using System;
 using AccessIt.Api.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,42 +11,14 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AccessIt.Api.Migrations
 {
     [DbContext(typeof(AccessItDbContext))]
-    partial class AccessItDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260624143053_AddVisitorListIndex")]
+    partial class AddVisitorListIndex
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");
-
-            modelBuilder.Entity("AccessIt.Api.Domain.AccessCard", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("AccessPersonId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CardNo")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("CreatedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("IsVirtual")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AccessPersonId");
-
-                    b.HasIndex("CardNo")
-                        .IsUnique();
-
-                    b.ToTable("AccessCards");
-                });
 
             modelBuilder.Entity("AccessIt.Api.Domain.AccessPerson", b =>
                 {
@@ -376,17 +349,6 @@ namespace AccessIt.Api.Migrations
                     b.ToTable("FaceAssets");
                 });
 
-            modelBuilder.Entity("AccessIt.Api.Domain.AccessCard", b =>
-                {
-                    b.HasOne("AccessIt.Api.Domain.AccessPerson", "AccessPerson")
-                        .WithMany("Cards")
-                        .HasForeignKey("AccessPersonId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("AccessPerson");
-                });
-
             modelBuilder.Entity("AccessIt.Api.Domain.AccessPerson", b =>
                 {
                     b.HasOne("AccessIt.Api.Services.FaceAsset", "FaceAsset")
@@ -410,8 +372,6 @@ namespace AccessIt.Api.Migrations
 
             modelBuilder.Entity("AccessIt.Api.Domain.AccessPerson", b =>
                 {
-                    b.Navigation("Cards");
-
                     b.Navigation("Sources");
                 });
 #pragma warning restore 612, 618

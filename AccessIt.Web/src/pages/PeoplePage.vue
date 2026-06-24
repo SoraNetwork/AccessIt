@@ -13,7 +13,7 @@ const filtered = computed(() => people.value.filter(x => !query.value || `${x.na
 async function load() { people.value = (await api.get<Person[]>('/persons', { skipGlobalLoading: true })).data }
 async function sync(kind: 'hikiot' | 'dingtalk') { busy.value = true; try { await api.post(`/persons/sync/${kind}`); await load() } finally { busy.value = false } }
 async function publish(person: Person) { await api.post(`/persons/${person.id}/publish-hikiot`); await load() }
-function edit(person: Person) { credential.value = { id: person.id, name: person.name, cardNo: person.cardNo, password: '' }; editOpen.value = true }
+function edit(person: Person) { credential.value = { id: person.id, name: person.name, cardNo: person.cardNos?.join(', ') || person.cardNo, password: '' }; editOpen.value = true }
 async function save() { await api.put(`/persons/${credential.value.id}/credentials`, { cardNo: credential.value.cardNo, password: credential.value.password || null, faceAssetId: null }); editOpen.value = false; await load() }
 async function upload(person: Person, file: File) { const data = new FormData(); data.append('file', file); const { data: face } = await api.post(`/persons/${person.id}/face`, data); await api.put(`/persons/${person.id}/credentials`, { cardNo: null, password: null, faceAssetId: face.faceAssetId }); await load(); return false }
 onMounted(load)
@@ -32,9 +32,9 @@ onMounted(load)
       <a-table-column title="手机号" data-index="mobile" />
       <a-table-column title="类型" data-index="kind" />
       <a-table-column title="来源"><template #default="{ record }"><a-tag v-for="source in record.sources" :key="source" :color="source === 'Hikiot' ? 'blue' : 'green'">{{ source }}</a-tag></template></a-table-column>
-      <a-table-column title="认证"><template #default="{ record }">{{ record.cardNo ? '卡' : '' }}{{ record.faceAssetId ? ' 人脸' : '' }}</template></a-table-column>
+      <a-table-column title="认证"><template #default="{ record }">{{ record.cardNos?.length ? `卡 × ${record.cardNos.length}` : '' }}{{ record.faceAssetId || record.hikiotFaceUrl ? ' 人脸' : '' }}{{ !record.cardNos?.length && !record.faceAssetId && !record.hikiotFaceUrl ? '-' : '' }}</template></a-table-column>
       <a-table-column title="操作" fixed="right"><template #default="{ record }"><a-space><a-button size="small" @click="edit(record)">认证信息</a-button><a-upload :before-upload="(file: File) => upload(record, file)" :show-upload-list="false"><a-button size="small">上传人脸</a-button></a-upload><a-button v-if="record.kind === 'Employee' && !record.hikiotPersonNo" size="small" type="primary" @click="publish(record)">下发到海康团队</a-button></a-space></template></a-table-column>
     </a-table>
   </a-space>
-  <a-modal v-model:open="editOpen" :title="`认证信息：${credential.name}`" @ok="save"><a-form layout="vertical"><a-form-item label="卡号"><a-input v-model:value="credential.cardNo" /></a-form-item><a-form-item label="密码（仅本次下发，不保存）"><a-input-password v-model:value="credential.password" /></a-form-item></a-form></a-modal>
+  <a-modal v-model:open="editOpen" :title="`认证信息：${credential.name}`" @ok="save"><a-form layout="vertical"><a-form-item label="卡号（可多张，以逗号或换行分隔）"><a-textarea v-model:value="credential.cardNo" /></a-form-item><a-form-item label="密码（仅本次下发，不保存）"><a-input-password v-model:value="credential.password" /></a-form-item></a-form></a-modal>
 </template>

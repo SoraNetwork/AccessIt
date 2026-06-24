@@ -21,6 +21,7 @@ public interface IHikiotGateway
 
     Task<IReadOnlyList<HikiotTeamPerson>> GetTeamPeopleAsync(CancellationToken cancellationToken = default);
     Task<string> CreateTeamPersonAsync(string name, string? mobile, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<HikiotIdentification>> GetTeamIdentificationsAsync(string personNo, CancellationToken cancellationToken = default);
     Task AddTeamCardAsync(string personNo, string cardNo, CancellationToken cancellationToken = default);
     Task AddTeamFaceAsync(string personNo, string faceUrl, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<HikiotDoorDevice>> GetDoorDevicesAsync(CancellationToken cancellationToken = default);
@@ -31,6 +32,7 @@ public interface IHikiotGateway
 }
 
 public sealed record HikiotTeamPerson(string PersonNo, string Name, string? Mobile);
+public sealed record HikiotIdentification(int Type, string Value);
 public sealed record HikiotDoorDevice(string Serial, string Name, bool SupportsUserInfo, bool SupportsCard, bool SupportsFace, bool SupportsPassword);
 public sealed record HikiotDirectUser(string EmployeeNo, string Name, bool IsVisitor, bool PermanentValid, DateTime BeginUtc, DateTime EndUtc, string? Password);
 public sealed record DeviceIssueResult(string DeviceSerial, bool Succeeded, string Message);
