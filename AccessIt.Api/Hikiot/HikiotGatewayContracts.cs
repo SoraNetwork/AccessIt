@@ -17,6 +17,7 @@ public interface IHikiotGateway
 
     /// <summary>OAuth 回调：用 authCode 换取并持久化 UserAccessToken。</summary>
     Task CompleteAuthorizationAsync(string state, string authCode, CancellationToken cancellationToken = default);
+    Task SetDefaultDepartmentAsync(string departmentNo, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<HikiotTeamPerson>> GetTeamPeopleAsync(CancellationToken cancellationToken = default);
     Task<string> CreateTeamPersonAsync(string name, string? mobile, CancellationToken cancellationToken = default);

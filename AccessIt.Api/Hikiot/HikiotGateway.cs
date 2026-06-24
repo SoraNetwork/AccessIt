@@ -95,6 +95,14 @@ public class HikiotGateway(
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task SetDefaultDepartmentAsync(string departmentNo, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(departmentNo)) throw new InvalidOperationException("请填写海康根部门编号（departNo）。");
+        var connection = await GetConnectionAsync(cancellationToken);
+        connection.DefaultDepartmentNo = departmentNo.Trim();
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  Token 缓存机制（AT/UT）—— 保留，供后续业务方法复用
     // ─────────────────────────────────────────────────────────────────────────────
@@ -227,22 +235,23 @@ public class HikiotGateway(
     public async Task<IReadOnlyList<HikiotTeamPerson>> GetTeamPeopleAsync(CancellationToken cancellationToken = default)
     {
         var connection = await GetConnectionAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(connection.TeamNo)) throw new InvalidOperationException("HIKIoT team is unavailable; authorize the connection first.");
         var result = new Dictionary<string, HikiotTeamPerson>(StringComparer.OrdinalIgnoreCase);
         const int teamPageSize = 50;
-        for (var page = 1; page <= 100; page++)
+        foreach (var departmentNo in await GetAllDepartmentNosAsync(connection, cancellationToken))
         {
-            var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(connection.TeamNo)}&page={page}&size={teamPageSize}", cancellationToken);
-            EnsureApiSuccess(response, "读取海康团队人员失败");
-            var entries = GetArray(response.Data, "list", "records", "items", "data");
-            foreach (var item in entries)
+            for (var page = 1; page <= 100; page++)
             {
-                var personNo = GetString(item, "personNo", "person_no", "id");
-                var name = GetString(item, "name", "personName");
-                if (!string.IsNullOrWhiteSpace(personNo) && !string.IsNullOrWhiteSpace(name))
-                    result[personNo] = new HikiotTeamPerson(personNo, name, GetString(item, "phone", "mobile"));
+                var response = await GetSecureAsync<JsonElement>($"/team/v1/person/page?departNo={Uri.EscapeDataString(departmentNo)}&page={page}&size={teamPageSize}", cancellationToken);
+                EnsureApiSuccess(response, "读取海康团队人员失败");
+                var entries = GetArray(response.Data, "list", "records", "items", "data");
+                foreach (var item in entries)
+                {
+                    var personNo = GetString(item, "personNo", "person_no", "id");
+                    var name = GetString(item, "name", "personName");
+                    if (!string.IsNullOrWhiteSpace(personNo) && !string.IsNullOrWhiteSpace(name)) result[personNo] = new HikiotTeamPerson(personNo, name, GetString(item, "phone", "mobile"));
+                }
+                if (entries.Count < teamPageSize) break;
             }
-            if (entries.Count < teamPageSize) break;
         }
         return result.Values.OrderBy(x => x.Name).ToList();
     }
@@ -250,8 +259,8 @@ public class HikiotGateway(
     public async Task<string> CreateTeamPersonAsync(string name, string? mobile, CancellationToken cancellationToken = default)
     {
         var connection = await GetConnectionAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(connection.TeamNo)) throw new InvalidOperationException("HIKIoT team is unavailable; authorize the connection first.");
-        var response = await PostSecureAsync<JsonElement>("/team/v1/person/add", new { name, phone = mobile, departNo = connection.TeamNo }, cancellationToken);
+        var departmentNo = await GetRootDepartmentNoAsync(connection, cancellationToken);
+        var response = await PostSecureAsync<JsonElement>("/team/v1/person/add", new { name, phone = mobile, departNo = departmentNo }, cancellationToken);
         EnsureApiSuccess(response, "创建海康团队人员失败");
         var personNo = GetString(response.Data, "personNo", "person_no", "id");
         if (string.IsNullOrWhiteSpace(personNo)) throw new InvalidOperationException("海康未返回人员编号。");
@@ -343,6 +352,38 @@ public class HikiotGateway(
         if (element.ValueKind != JsonValueKind.Object) return null;
         foreach (var name in names) if (element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return value.ToString();
         return null;
+    }
+    private async Task<string> GetRootDepartmentNoAsync(HikiotConnection connection, CancellationToken cancellationToken)
+    {
+        var response = await GetSecureAsync<JsonElement>("/team/v1/depart/getDeparts", cancellationToken);
+        EnsureApiSuccess(response, "读取海康根部门失败");
+        var roots = GetArray(response.Data, "teamDepartVOs", "list", "records", "items");
+        var root = roots.FirstOrDefault(x => GetString(x, "level") == "0");
+        if (root.ValueKind == JsonValueKind.Undefined && roots.Count > 0) root = roots[0];
+        var departmentNo = GetString(root, "departNo");
+        if (string.IsNullOrWhiteSpace(departmentNo)) throw new InvalidOperationException("海康未返回根部门 departNo。");
+        connection.DefaultDepartmentNo = departmentNo;
+        await db.SaveChangesAsync(cancellationToken);
+        return departmentNo;
+    }
+
+    private async Task<IReadOnlyList<string>> GetAllDepartmentNosAsync(HikiotConnection connection, CancellationToken cancellationToken)
+    {
+        var root = await GetRootDepartmentNoAsync(connection, cancellationToken);
+        var all = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root };
+        var pending = new Queue<string>();
+        pending.Enqueue(root);
+        while (pending.TryDequeue(out var parentNo))
+        {
+            var response = await GetSecureAsync<JsonElement>($"/team/v1/depart/getDeparts?departNo={Uri.EscapeDataString(parentNo)}", cancellationToken);
+            EnsureApiSuccess(response, "读取海康子部门失败");
+            foreach (var child in GetArray(response.Data, "teamDepartVOs", "list", "records", "items"))
+            {
+                var childNo = GetString(child, "departNo");
+                if (!string.IsNullOrWhiteSpace(childNo) && all.Add(childNo)) pending.Enqueue(childNo);
+            }
+        }
+        return all.ToList();
     }
 
     private HttpClient CreateClient()

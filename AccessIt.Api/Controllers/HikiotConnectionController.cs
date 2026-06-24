@@ -23,6 +23,14 @@ public sealed class HikiotConnectionController(IHikiotGateway hikiot) : Controll
     public async Task<ActionResult<object>> Begin(CancellationToken cancellationToken)
         => Ok(new { authorizationUrl = await hikiot.BeginAuthorizationAsync(User.CurrentUserId(), cancellationToken) });
 
+    [Authorize(Roles = nameof(ApplicationRole.SuperAdmin))]
+    [HttpPut("default-department")]
+    public async Task<IActionResult> SetDefaultDepartment([FromBody] SetDefaultDepartmentRequest request, CancellationToken cancellationToken)
+    {
+        await hikiot.SetDefaultDepartmentAsync(request.DepartmentNo, cancellationToken);
+        return NoContent();
+    }
+
     [AllowAnonymous]
     [HttpGet("callback")]
     public async Task<IActionResult> Callback([FromQuery] string state, [FromQuery] string authCode, CancellationToken cancellationToken)
@@ -31,3 +39,5 @@ public sealed class HikiotConnectionController(IHikiotGateway hikiot) : Controll
         return Content("HIKIoT 授权成功，您可以关闭此页面。", "text/html; charset=utf-8");
     }
 }
+
+public sealed record SetDefaultDepartmentRequest(string DepartmentNo);
