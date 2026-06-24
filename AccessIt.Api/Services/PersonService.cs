@@ -23,8 +23,13 @@ public interface IPersonService
 
 public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, IOptions<HikiotOptions> hikiotOptions) : IPersonService
 {
+    private static readonly SemaphoreSlim SyncGate = new(1, 1);
+
     public async Task<SyncResult> SyncHikiotAsync(CancellationToken cancellationToken = default)
     {
+        await SyncGate.WaitAsync(cancellationToken);
+        try
+        {
         var created = 0; var updated = 0;
         foreach (var remote in await hikiot.GetTeamPeopleAsync(cancellationToken))
         {
@@ -35,10 +40,15 @@ public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, I
         }
         await db.SaveChangesAsync(cancellationToken);
         return new SyncResult(created, updated);
+        }
+        finally { SyncGate.Release(); }
     }
 
     public async Task<SyncResult> SyncDingTalkAsync(IReadOnlyList<DingTalkDirectoryEntry> entries, CancellationToken cancellationToken = default)
     {
+        await SyncGate.WaitAsync(cancellationToken);
+        try
+        {
         var created = 0; var updated = 0;
         foreach (var entry in entries.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.UserId)))
         {
@@ -48,6 +58,8 @@ public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, I
         }
         await db.SaveChangesAsync(cancellationToken);
         return new SyncResult(created, updated);
+        }
+        finally { SyncGate.Release(); }
     }
 
     public async Task<AccessPerson> CreateVisitorAsync(string name, DateTime beginUtc, DateTime endUtc, string? cardNo, string? password, Guid? faceAssetId, bool generateQr, CancellationToken cancellationToken = default)
@@ -95,11 +107,11 @@ public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, I
 
     public async Task PublishToHikiotAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        var person = await db.AccessPeople.Include(x => x.Sources).SingleOrDefaultAsync(x => x.Id == id, cancellationToken) ?? throw new KeyNotFoundException("人员不存在。");
+        var person = await db.AccessPeople.SingleOrDefaultAsync(x => x.Id == id, cancellationToken) ?? throw new KeyNotFoundException("人员不存在。");
         if (person.Kind != AccessPersonKind.Employee) throw new InvalidOperationException("访客不能创建为海康团队人员。");
         if (!string.IsNullOrWhiteSpace(person.HikiotPersonNo)) return;
         person.HikiotPersonNo = await hikiot.CreateTeamPersonAsync(person.Name, person.Mobile, cancellationToken);
-        person.Sources.Add(new PersonSource { SourceType = PersonSourceType.Hikiot, ExternalId = person.HikiotPersonNo });
+        db.PersonSources.Add(new PersonSource { AccessPersonId = person.Id, SourceType = PersonSourceType.Hikiot, ExternalId = person.HikiotPersonNo });
         person.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
     }
@@ -149,7 +161,7 @@ public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, I
     private async Task<(AccessPerson Person, bool Created)> FindOrCreateAsync(string name, string? mobile, AccessPersonKind kind, PersonSourceType sourceType, string externalId, string? unionId, CancellationToken cancellationToken)
     {
         var source = await db.PersonSources.Include(x => x.AccessPerson).SingleOrDefaultAsync(x => x.SourceType == sourceType && x.ExternalId == externalId, cancellationToken);
-        var person = source?.AccessPerson ?? await db.AccessPeople.Include(x => x.Sources).FirstOrDefaultAsync(x => x.NormalizedName == Normalize(name), cancellationToken);
+        var person = source?.AccessPerson ?? await db.AccessPeople.FirstOrDefaultAsync(x => x.NormalizedName == Normalize(name), cancellationToken);
         var created = person is null;
         if (person is null)
         {
@@ -157,7 +169,13 @@ public sealed class PersonService(AccessItDbContext db, IHikiotGateway hikiot, I
             db.AccessPeople.Add(person);
         }
         person.Mobile ??= mobile;
-        if (!person.Sources.Any(x => x.SourceType == sourceType && x.ExternalId == externalId)) person.Sources.Add(new PersonSource { SourceType = sourceType, ExternalId = externalId, UnionId = unionId });
+        if (source is null)
+            db.PersonSources.Add(new PersonSource { AccessPerson = person, SourceType = sourceType, ExternalId = externalId, UnionId = unionId });
+        else
+        {
+            source.UnionId ??= unionId;
+            source.SyncedAtUtc = DateTime.UtcNow;
+        }
         return (person, created);
     }
 
