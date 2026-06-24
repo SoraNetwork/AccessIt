@@ -114,4 +114,6 @@ public sealed class HikiotUserPlanTemplate
     public string Name { get; init; } = string.Empty;
     [JsonPropertyName("doorWeekId")]
     public int DoorWeekId { get; init; }
+    [JsonPropertyName("holidayGroupNo")]
+    public List<int> HolidayGroupNo { get; init; } = [];
 }

@@ -25,6 +25,10 @@ public sealed class HikiotGateway(
         PropertyNameCaseInsensitive = true,
         NumberHandling = JsonNumberHandling.AllowReadingFromString
     };
+    private static readonly JsonSerializerOptions WriteJsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
     private readonly HikiotOptions _options = options.Value;
 
     public async Task<HikiotConnectionStatus> GetConnectionStatusAsync(CancellationToken cancellationToken = default)
@@ -92,7 +96,8 @@ public sealed class HikiotGateway(
     public async Task<HikiotTeamPersonCreateResult> CreateTeamPersonAsync(HikiotTeamPersonUpsert request, CancellationToken cancellationToken = default)
     {
         ValidateTeamPersonUpsert(request, false);
-        var body = new { personName = request.Name.Trim(), departNo = request.DepartmentNo.Trim(), phone = request.Phone.Trim(), jobNumber = NullIfWhiteSpace(request.JobNumber), jobPosition = NullIfWhiteSpace(request.JobPosition), sex = request.Sex, idCard = NullIfWhiteSpace(request.IdCard) };
+        var sex = request.Sex is 1 or 2 ? request.Sex : null;
+        var body = new { personName = request.Name.Trim(), departNo = request.DepartmentNo.Trim(), phone = request.Phone.Trim(), jobNumber = NullIfWhiteSpace(request.JobNumber), jobPosition = NullIfWhiteSpace(request.JobPosition), sex, idCard = NullIfWhiteSpace(request.IdCard) };
         var response = await PostSecureAsync<HikiotTeamPersonCreatedData>("/team/v1/person/add", body, cancellationToken);
         return new HikiotTeamPersonCreateResult(response.Code == 0, response.Code, response.Message, response.Data?.PersonNo, response.Detail);
     }
@@ -100,8 +105,9 @@ public sealed class HikiotGateway(
     public async Task<HikiotOperationResult> UpdateTeamPersonAsync(HikiotTeamPersonUpsert request, CancellationToken cancellationToken = default)
     {
         ValidateTeamPersonUpsert(request, true);
+        var sex = request.Sex is 1 or 2 ? request.Sex : null;
         // HIKIoT's update API intentionally does not accept phone, department or job number. Keep those immutable remotely.
-        var body = new { personNo = request.PersonNo!.Trim(), personName = request.Name.Trim(), jobPosition = NullIfWhiteSpace(request.JobPosition), sex = request.Sex };
+        var body = new { personNo = request.PersonNo!.Trim(), personName = request.Name.Trim(), jobPosition = NullIfWhiteSpace(request.JobPosition), sex };
         return ToOperation(await PostSecureAsync<JsonElement>("/team/v1/person/update", body, cancellationToken));
     }
 
@@ -524,7 +530,6 @@ public sealed class HikiotGateway(
         }
         finally { TeamReadGate.Release(); }
     }
-
     private async Task<HikiotEnvelope<T>> GetSecureAsync<T>(string relativePath, CancellationToken cancellationToken)
     {
         var tokens = await GetAuthorizedTokensAsync(cancellationToken);
@@ -536,7 +541,7 @@ public sealed class HikiotGateway(
     private async Task<HikiotEnvelope<T>> PostSecureAsync<T>(string relativePath, object body, CancellationToken cancellationToken)
     {
         var tokens = await GetAuthorizedTokensAsync(cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Post, relativePath) { Content = JsonContent.Create(body) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, relativePath) { Content = JsonContent.Create(body, options: WriteJsonOptions) };
         AddTokens(request, tokens);
         return await SendAsync<T>(CreateClient(), request, cancellationToken);
     }
